@@ -6,7 +6,7 @@
 #define _METERPRETER_SOURCE_COMMON_COMMON_H
 
 /*! @brief Set to 0 for "normal", and 1 to "verbose", comment out to disable completely. */
-//#define DEBUGTRACE 0
+#define DEBUGTRACE 1
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -179,6 +179,8 @@ void real_dprintf(char *filename, int line, const char *function, char *format, 
 #define METERPRETER_TRANSPORT_HTTP  1
 /*! @brief Indication that the Meterpreter transport is using HTTPS. */
 #define METERPRETER_TRANSPORT_HTTPS 2
+/*! @brief Indication that the Meterpreter transport is using DNS */
+#define METERPRETER_TRANSPORT_DNS 3
 
 #ifdef _WIN32
 

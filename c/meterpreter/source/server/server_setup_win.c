@@ -6,6 +6,7 @@
 #include <ws2tcpip.h>
 
 #include "win/server_transport_winhttp.h"
+#include "win/server_transport_windns.h"
 #include "win/server_transport_tcp.h"
 #include "ssl_lib_setup.h"
 
@@ -114,6 +115,15 @@ static Transport* create_transport(Remote* remote, MetsrvTransportCommon* transp
 			*size = sizeof(MetsrvTransportTcp);
 		}
 		transport = transport_create_tcp((MetsrvTransportTcp*)transportCommon);
+	}
+	else if (wcsncmp(transportCommon->url, L"dns", 3) == 0)
+	{
+		if (size)
+		{
+			*size = sizeof(MetsrvTransportDns);
+		}
+		transport = transport_create_dns((MetsrvTransportDns*)transportCommon);
+		
 	}
 	else
 	{
