@@ -180,7 +180,7 @@ void real_dprintf(char *filename, int line, const char *function, char *format, 
 /*! @brief Indication that the Meterpreter transport is using HTTPS. */
 #define METERPRETER_TRANSPORT_HTTPS 2
 /*! @brief Indication that the Meterpreter transport is using DNS */
-#define METERPRETER_TRANSPORT_DNS 3
+#define METERPRETER_TRANSPORT_DNS 0
 
 #ifdef _WIN32
 

@@ -671,6 +671,10 @@ static DWORD packet_receive_via_ssl(Remote *remote, Packet **packet)
 		}
 
 		xor_bytes(header.xor_key, payload, payloadLength);
+        
+        dprintf("[PACKET RECEIVE DNS] key:0x%x len:0x%x",header.xor_key, header.length);
+			// Initialize the header
+		vdprintf("[PACKET RECEIVE DNS] tlv length: %d", header.length);
 
 		// Allocate a packet structure
 		if (!(localPacket = (Packet *)malloc(sizeof(Packet))))
@@ -680,7 +684,7 @@ static DWORD packet_receive_via_ssl(Remote *remote, Packet **packet)
 		}
 
 		memset(localPacket, 0, sizeof(Packet));
-
+        dprintf("[PACKET RECEIVE DNS] copy %d",payloadLength);
 		// If the connection has an established cipher and this packet is not
 		// plaintext, decrypt
 		if ((crypto = remote_get_cipher(remote)) &&
