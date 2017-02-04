@@ -212,7 +212,7 @@ DWORD remote_request_core_transport_list(Remote* remote, Packet* packet)
 			dprintf("[DISPATCH] Adding Retry wait %u", current->timeouts.retry_wait);
 			packet_add_tlv_uint(transportGroup, TLV_TYPE_TRANS_RETRY_WAIT, current->timeouts.retry_wait);
 
-			if (current->type != METERPRETER_TRANSPORT_SSL)
+			if (current->type != METERPRETER_TRANSPORT_SSL && current->type != METERPRETER_TRANSPORT_DNS)
 			{
 				HttpTransportContext* ctx = (HttpTransportContext*)current->ctx;
 				dprintf("[DISPATCH] Transport is HTTP/S");
@@ -236,7 +236,14 @@ DWORD remote_request_core_transport_list(Remote* remote, Packet* packet)
 				{
 					packet_add_tlv_raw(transportGroup, TLV_TYPE_TRANS_CERT_HASH, ctx->cert_hash, CERT_HASH_SIZE);
 				}
-			}
+			} else if (current->type == METERPRETER_TRANSPORT_DNS){
+                DnsTransportContext* ctx = (DnsTransportContext*)current->ctx;
+				dprintf("[DISPATCH] Transport is DNS");
+                if (ctx->ns_server)
+				{
+					packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_NSHOST, ctx->ns_server);
+				}
+            }
 
 			packet_add_group(response, TLV_TYPE_TRANS_GROUP, transportGroup);
 
