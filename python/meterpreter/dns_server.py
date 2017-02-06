@@ -174,8 +174,8 @@ class DNSTunnelResponse():
     def get_ipv6(self):
         return self.ansx
         
-D = DomainName('0x41.ws.')
-IP = '54.194.143.85'
+D = DomainName('zlo.ws.') # PUT DOMAIN!!!
+IP = '14.14.13.15'        # PUT IP!!
 TTL = 1
 
 
