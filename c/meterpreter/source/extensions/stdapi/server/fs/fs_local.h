@@ -4,13 +4,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#ifdef _WIN32
 #define FS_SEPARATOR "\\"
 #define FS_MAX_PATH  32768
-#else
-#define FS_SEPARATOR "/"
-#define FS_MAX_PATH  PATH_MAX
-#endif
 
 /*
  * Stat structures on Windows and various Unixes are all slightly different.
@@ -58,6 +53,8 @@ int fs_getwd(char **directory);
 int fs_mkdir(const char *directory);
 
 int fs_move(const char *oldpath, const char *newpath);
+
+int fs_copy(const char *oldpath, const char *newpath);
 
 /*
  * Fills the platform-independent meterp_stat buf with data from the

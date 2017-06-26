@@ -24,7 +24,7 @@
 /*!
  * @brief Enumeration of allowed Packet TLV types.
  */
-typedef enum 
+typedef enum
 {
 	PACKET_TLV_TYPE_REQUEST        = 0,   ///< Indicates a request packet.
 	PACKET_TLV_TYPE_RESPONSE       = 1,   ///< Indicates a response packet.
@@ -136,13 +136,15 @@ typedef enum
 	TLV_TYPE_LIBRARY_PATH        = TLV_VALUE(TLV_META_TYPE_STRING,    400),   ///! Represents a path to the library to be loaded (string).
 	TLV_TYPE_TARGET_PATH         = TLV_VALUE(TLV_META_TYPE_STRING,    401),   ///! Represents a target path (string).
 	TLV_TYPE_MIGRATE_PID         = TLV_VALUE(TLV_META_TYPE_UINT,      402),   ///! Represents a process identifier of the migration target (unsigned integer).
-	TLV_TYPE_MIGRATE_LEN         = TLV_VALUE(TLV_META_TYPE_UINT,      403),   ///! Represents a migration payload size/length in bytes (unsigned integer).
+	TLV_TYPE_MIGRATE_PAYLOAD_LEN = TLV_VALUE(TLV_META_TYPE_UINT,      403),   ///! Represents a migration payload size/length in bytes (unsigned integer).
 	TLV_TYPE_MIGRATE_PAYLOAD     = TLV_VALUE(TLV_META_TYPE_STRING,    404),   ///! Represents a migration payload (string).
 	TLV_TYPE_MIGRATE_ARCH        = TLV_VALUE(TLV_META_TYPE_UINT,      405),   ///! Represents a migration target architecture.
 	TLV_TYPE_MIGRATE_TECHNIQUE   = TLV_VALUE(TLV_META_TYPE_UINT,      406),   ///! Represents a migration technique (unsigned int).
 	TLV_TYPE_MIGRATE_BASE_ADDR   = TLV_VALUE(TLV_META_TYPE_UINT,      407),   ///! Represents a migration payload base address (unsigned int).
 	TLV_TYPE_MIGRATE_ENTRY_POINT = TLV_VALUE(TLV_META_TYPE_UINT,      408),   ///! Represents a migration payload entry point (unsigned int).
 	TLV_TYPE_MIGRATE_SOCKET_PATH = TLV_VALUE(TLV_META_TYPE_STRING,    409),   ///! Represents a unix domain socket path, used to migrate on linux (string)
+	TLV_TYPE_MIGRATE_STUB_LEN    = TLV_VALUE(TLV_META_TYPE_UINT,      410),   ///! Represents a migration stub length (uint).
+	TLV_TYPE_MIGRATE_STUB        = TLV_VALUE(TLV_META_TYPE_STRING,    411),   ///! Represents a migration stub (string).
 
 	// Transport switching
 	TLV_TYPE_TRANS_TYPE          = TLV_VALUE(TLV_META_TYPE_UINT,      430),   ///! Represents the type of transport to switch to.
@@ -161,17 +163,12 @@ typedef enum
 	// session/machine identification
 	TLV_TYPE_MACHINE_ID          = TLV_VALUE(TLV_META_TYPE_STRING,    460),   ///! Represents a machine identifier.
 	TLV_TYPE_UUID                = TLV_VALUE(TLV_META_TYPE_RAW,       461),   ///! Represents a UUID.
-
-	// Cryptography
-	TLV_TYPE_CIPHER_NAME         = TLV_VALUE(TLV_META_TYPE_STRING,    500),   ///! Represents the name of a cipher.
-	TLV_TYPE_CIPHER_PARAMETERS   = TLV_VALUE(TLV_META_TYPE_GROUP,     501),   ///! Represents parameters for a cipher.
+	TLV_TYPE_SESSION_GUID        = TLV_VALUE(TLV_META_TYPE_RAW,       462),   ///! Represents a Session GUID.
 
 	TLV_TYPE_EXTENSIONS          = TLV_VALUE(TLV_META_TYPE_COMPLEX, 20000),   ///! Represents an extension value.
 	TLV_TYPE_USER                = TLV_VALUE(TLV_META_TYPE_COMPLEX, 40000),   ///! Represents a user value.
 	TLV_TYPE_TEMP                = TLV_VALUE(TLV_META_TYPE_COMPLEX, 60000),   ///! Represents a temporary value.
 } TlvType;
-
-#ifdef _WIN32
 
 #ifndef QWORD
 typedef unsigned __int64	QWORD;
@@ -179,8 +176,6 @@ typedef unsigned __int64	QWORD;
 
 #define ntohq( qword )		( (QWORD)ntohl( qword & 0xFFFFFFFF ) << 32 ) | ntohl( qword >> 32 )
 #define htonq( qword )		ntohq( qword )
-
-#endif
 
 typedef struct
 {
@@ -224,7 +219,7 @@ typedef struct _DECOMPRESSED_BUFFER
 } DECOMPRESSED_BUFFER;
 
 /*! * @brief Packet request completion notification handler function pointer type. */
-typedef DWORD (*PacketRequestCompletionRoutine)(Remote *remote, 
+typedef DWORD (*PacketRequestCompletionRoutine)(Remote *remote,
 		Packet *response, LPVOID context, LPCSTR method, DWORD result);
 
 typedef struct _PacketRequestCompletion
@@ -261,12 +256,12 @@ LINKAGE DWORD packet_get_tlv_string(Packet *packet, TlvType type, Tlv *tlv);
 LINKAGE DWORD packet_get_tlv_group_entry(Packet *packet, Tlv *group, TlvType type,Tlv *entry);
 LINKAGE DWORD packet_enum_tlv(Packet *packet, DWORD index, TlvType type, Tlv *tlv);
 
-LINKAGE PCHAR packet_get_tlv_value_string(Packet *packet, TlvType type); 
+LINKAGE PCHAR packet_get_tlv_value_string(Packet *packet, TlvType type);
 LINKAGE wchar_t* packet_get_tlv_value_wstring(Packet* packet, TlvType type);
 LINKAGE UINT packet_get_tlv_value_uint(Packet *packet, TlvType type);
 LINKAGE BYTE * packet_get_tlv_value_raw( Packet * packet, TlvType type );
 LINKAGE QWORD packet_get_tlv_value_qword(Packet *packet, TlvType type);
-LINKAGE BOOL packet_get_tlv_value_bool(Packet *packet, TlvType type); 
+LINKAGE BOOL packet_get_tlv_value_bool(Packet *packet, TlvType type);
 
 LINKAGE DWORD packet_add_exception(Packet *packet, DWORD code,PCHAR string, ...);
 

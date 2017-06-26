@@ -51,18 +51,27 @@ static HINTERNET get_request_winhttp(HttpTransportContext *ctx, BOOL isGet, cons
 				dprintf("[PROXY] Proxy: %S", ieConfig.lpszProxy);
 				dprintf("[PROXY] Proxy Bypass: %S", ieConfig.lpszProxyBypass);
 
-				if (ieConfig.lpszAutoConfigUrl)
+				if (ieConfig.lpszAutoConfigUrl || ieConfig.fAutoDetect)
 				{
 					WINHTTP_AUTOPROXY_OPTIONS autoProxyOpts = { 0 };
 					WINHTTP_PROXY_INFO proxyInfo = { 0 };
 
-					dprintf("[PROXY] IE config set to autodetect with URL %S", ieConfig.lpszAutoConfigUrl);
+					if (ieConfig.fAutoDetect)
+					{
+						dprintf("[PROXY] IE config set to autodetect with DNS or DHCP");
 
-					autoProxyOpts.dwFlags = WINHTTP_AUTOPROXY_AUTO_DETECT | WINHTTP_AUTOPROXY_CONFIG_URL;
-					autoProxyOpts.dwAutoDetectFlags = WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+						autoProxyOpts.dwFlags = WINHTTP_AUTOPROXY_AUTO_DETECT;
+						autoProxyOpts.dwAutoDetectFlags = WINHTTP_AUTO_DETECT_TYPE_DHCP | WINHTTP_AUTO_DETECT_TYPE_DNS_A;
+					}
+					else
+					{
+						dprintf("[PROXY] IE config set to autodetect with URL %S", ieConfig.lpszAutoConfigUrl);
+
+						autoProxyOpts.dwFlags = WINHTTP_AUTOPROXY_CONFIG_URL;
+						autoProxyOpts.lpszAutoConfigUrl = ieConfig.lpszAutoConfigUrl;
+					}
+
 					autoProxyOpts.fAutoLogonIfChallenged = TRUE;
-					autoProxyOpts.lpszAutoConfigUrl = ieConfig.lpszAutoConfigUrl;
-
 					if (WinHttpGetProxyForUrl(ctx->internet, ctx->url, &autoProxyOpts, &proxyInfo))
 					{
 						ctx->proxy_for_url = malloc(sizeof(WINHTTP_PROXY_INFO));
@@ -268,7 +277,6 @@ static DWORD validate_response_winhttp(HANDLE hReq, HttpTransportContext* ctx)
  * @param packet Pointer to the \c Packet that is to be sent.
  * @param completion Pointer to the completion routines to process.
  * @return An indication of the result of processing the transmission request.
- * @remark This function is not available on POSIX.
  */
 static DWORD packet_transmit_http(Remote *remote, Packet *packet, PacketRequestCompletion *completion)
 {
@@ -325,7 +333,6 @@ static DWORD packet_transmit_http(Remote *remote, Packet *packet, PacketRequestC
  */
 static DWORD packet_transmit_via_http(Remote *remote, Packet *packet, PacketRequestCompletion *completion)
 {
-	CryptoContext *crypto;
 	Tlv requestId;
 	DWORD res;
 
@@ -347,6 +354,9 @@ static DWORD packet_transmit_via_http(Remote *remote, Packet *packet, PacketRequ
 		packet_add_tlv_string(packet, TLV_TYPE_REQUEST_ID, rid);
 	}
 
+	// Always add the UUID to the packet as well, so that MSF knows who and what we are
+  	packet_add_tlv_raw(packet, TLV_TYPE_UUID, remote->orig_config->session.uuid, UUID_SIZE);
+
 	do
 	{
 		// If a completion routine was supplied and the packet has a request
@@ -356,32 +366,6 @@ static DWORD packet_transmit_via_http(Remote *remote, Packet *packet, PacketRequ
 			&requestId) == ERROR_SUCCESS))
 		{
 			packet_add_completion_handler((LPCSTR)requestId.buffer, completion);
-		}
-
-		// If the endpoint has a cipher established and this is not a plaintext
-		// packet, we encrypt
-		if ((crypto = remote_get_cipher(remote)) &&
-			(packet_get_type(packet) != PACKET_TLV_TYPE_PLAIN_REQUEST) &&
-			(packet_get_type(packet) != PACKET_TLV_TYPE_PLAIN_RESPONSE))
-		{
-			ULONG origPayloadLength = packet->payloadLength;
-			PUCHAR origPayload = packet->payload;
-
-			// Encrypt
-			if ((res = crypto->handlers.encrypt(crypto, packet->payload,
-				packet->payloadLength, &packet->payload,
-				&packet->payloadLength)) !=
-				ERROR_SUCCESS)
-			{
-				SetLastError(res);
-				break;
-			}
-
-			// Destroy the original payload as we no longer need it
-			free(origPayload);
-
-			// Update the header length
-			packet->header.length = htonl(packet->payloadLength + sizeof(TlvHeader));
 		}
 
 		dprintf("[PACKET] New xor key for sending");
@@ -421,12 +405,10 @@ static DWORD packet_transmit_via_http(Remote *remote, Packet *packet, PacketRequ
  * @param remote Pointer to the \c Remote instance.
  * @param packet Pointer to a pointer that will receive the \c Packet data.
  * @return An indication of the result of processing the transmission request.
- * @remark This function is not available in POSIX.
  */
 static DWORD packet_receive_http(Remote *remote, Packet **packet)
 {
 	DWORD headerBytes = 0, payloadBytesLeft = 0, res;
-	CryptoContext *crypto = NULL;
 	Packet *localPacket = NULL;
 	PacketHeader header;
 	LONG bytesRead;
@@ -580,26 +562,6 @@ static DWORD packet_receive_http(Remote *remote, Packet **packet)
 		}
 
 		memset(localPacket, 0, sizeof(Packet));
-
-		// If the connection has an established cipher and this packet is not
-		// plaintext, decrypt
-		if ((crypto = remote_get_cipher(remote)) &&
-			(packet_get_type(localPacket) != PACKET_TLV_TYPE_PLAIN_REQUEST) &&
-			(packet_get_type(localPacket) != PACKET_TLV_TYPE_PLAIN_RESPONSE))
-		{
-			ULONG origPayloadLength = payloadLength;
-			PUCHAR origPayload = payload;
-
-			// Decrypt
-			if ((res = crypto->handlers.decrypt(crypto, payload, payloadLength, &payload, &payloadLength)) != ERROR_SUCCESS)
-			{
-				SetLastError(res);
-				break;
-			}
-
-			// We no longer need the encrypted payload
-			free(origPayload);
-		}
 
 		localPacket->header.length = header.length;
 		localPacket->header.type = header.type;
@@ -862,12 +824,33 @@ static DWORD server_dispatch_http(Remote* remote, THREAD* dispatchThread)
 
 				// we also need to patch the new URI into the original transport URL, not just the currently
 				// active URI for comms. If we don't, then migration behaves badly.
-				// Start by locating the start of the URI in the current URL, by finding the third slash
-				wchar_t* csr = transport->url + wcslen(transport->url) - 2;
-				while (*csr != L'/')
+				// The URL looks like this:  http(s)://<domain-or-ip>:port/lurivalue/UUIDJUNK/
+				// Start by locating the start of the URI in the current URL, by finding the third slash,
+				// as this value includes the LURI
+				wchar_t* csr = transport->url;
+				for (int i = 0; i < 3; ++i)
 				{
-					--csr;
+					// We need to move to the next character first in case
+					// we are currently pointing at the previously found /
+					// we know we're safe skipping the first character in the whole
+					// URL because that'll be part of the scheme (ie. 'h' in http)
+					++csr;
+
+					while (*csr != L'\0' && *csr != L'/')
+					{
+						++csr;
+					}
+
+					dprintf("[DISPATCH] %d csr: %p -> %S", i, csr, csr);
+
+					// this shouldn't happen!
+					if (*csr == L'\0')
+					{
+						break;
+					}
 				}
+
+				// the pointer that we have will be 
 				dprintf("[DISPATCH] Pointer is at: %p -> %S", csr, csr);
 
 				// patch in the new URI

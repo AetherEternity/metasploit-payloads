@@ -16,11 +16,8 @@
 #define DOMAIN_NAME_SIZE 16
 #define NS_NAME_SIZE 128
 
-#ifdef _WIN32
 typedef wchar_t CHARTYPE;
-#else
-typedef char CHARTYPE;
-#endif
+
 typedef CHARTYPE* STRTYPE;
 typedef CHARTYPE const * CSTRTYPE;
 
@@ -30,6 +27,7 @@ typedef struct _MetsrvSession
 	DWORD exit_func;                      ///! Exit func identifier for when the session ends.
 	int expiry;                           ///! The total number of seconds to wait before killing off the session.
 	BYTE uuid[UUID_SIZE];                 ///! UUID
+	BYTE session_guid[sizeof(GUID)];      ///! Current session GUID
 } MetsrvSession;
 
 typedef struct _MetsrvTransportCommon
@@ -94,5 +92,22 @@ typedef struct _MetsrvConfig
 	// <name of extension>\x00<datasize><data>
 	// \x00
 } MetsrvConfig;
+
+// We force 64bit alignment for HANDLES and POINTERS in order
+// to be cross compatible between x86 and x64 migration.
+typedef struct _COMMONMIGRATECONTEXT
+{
+	union
+	{
+		HANDLE hEvent;
+		BYTE bPadding1[8];
+	} e;
+
+	union
+	{
+		LPBYTE lpPayload;
+		BYTE bPadding2[8];
+	} p;
+} COMMONMIGRATCONTEXT, * LPCOMMONMIGRATECONTEXT;
 
 #endif
