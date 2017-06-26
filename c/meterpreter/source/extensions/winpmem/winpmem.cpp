@@ -332,7 +332,7 @@ void WinPmem::CreateChildProcess(TCHAR *command, HANDLE stdout_wr)
 
 	// If an error occurs, exit the application.
 	if (!bSuccess) {
-		dprintf(L"Unable to launch process.");
+		dprintf("Unable to launch process.");
 		return;
 	}
 
@@ -375,7 +375,7 @@ void WinPmem::write_page_file()
 
 	// Create a pipe for the child process's STDOUT.
 	if (!CreatePipe(&stdout_rd, &stdout_wr, &saAttr, 0)) {
-		dprintf(L"StdoutRd CreatePipe");
+		dprintf("StdoutRd CreatePipe");
 		goto error;
 	};
 
@@ -397,7 +397,7 @@ void WinPmem::write_page_file()
 
 		if (!WriteFile(out_fd_, buffer_, bytes_read, &bytes_written, NULL) ||
 			bytes_written != bytes_read) {
-			dprintf(L"Failed to write image file");
+			dprintf("Failed to write image file");
 			goto error;
 		};
 
@@ -425,7 +425,7 @@ error:
 
 		if (!WriteFile(out_fd_, metadata, metadata_len, &bytes_written, NULL) ||
 			bytes_written != metadata_len) {
-			dprintf(L"Failed to write image file");
+			dprintf("Failed to write image file");
 		};
 
 		out_offset += bytes_written;

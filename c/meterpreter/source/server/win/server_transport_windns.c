@@ -710,7 +710,6 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
  */
 static DWORD packet_transmit_via_dns(Remote *remote, Packet *packet, PacketRequestCompletion *completion)
 {
-    CryptoContext *crypto;
     Tlv requestId;
     DWORD res;
     dprintf("[PACKET] TRANSMIT... 1 %x", packet);
@@ -744,34 +743,6 @@ static DWORD packet_transmit_via_dns(Remote *remote, Packet *packet, PacketReque
         {
             dprintf("[PACKET] TRANSMIT... 2.2");
             packet_add_completion_handler((LPCSTR)requestId.buffer, completion);
-        }
-
-        // If the endpoint has a cipher established and this is not a plaintext
-        // packet, we encrypt
-        if ((crypto = remote_get_cipher(remote)) &&
-            (packet_get_type(packet) != PACKET_TLV_TYPE_PLAIN_REQUEST) &&
-            (packet_get_type(packet) != PACKET_TLV_TYPE_PLAIN_RESPONSE))
-        {
-            ULONG origPayloadLength = packet->payloadLength;
-            PUCHAR origPayload = packet->payload;
-            dprintf("[PACKET] TRANSMIT... 2.3");
-            // Encrypt
-            if ((res = crypto->handlers.encrypt(crypto, packet->payload,
-                packet->payloadLength, &packet->payload,
-                &packet->payloadLength)) !=
-                ERROR_SUCCESS)
-            {
-                dprintf("[PACKET] TRANSMIT... 2.4");
-                SetLastError(res);
-                break;
-            }
-            dprintf("[PACKET] TRANSMIT... 2.5");
-            // Destroy the original payload as we no longer need it
-            free(origPayload);
-            dprintf("[PACKET] TRANSMIT... 2.6");
-            // Update the header length
-            packet->header.length = htonl(packet->payloadLength + sizeof(TlvHeader));
-            dprintf("[PACKET] TRANSMIT... 2.7");
         }
 
         dprintf("[PACKET] New xor key for sending");
@@ -827,7 +798,6 @@ static DWORD packet_receive_dns(Remote *remote, Packet **packet)
     DnsTransportContext* ctx = (DnsTransportContext*)remote->transport->ctx;
     DWORD retries = 5;
     IncapuslatedDns recieved;
-    CryptoContext* crypto = NULL;
     wchar_t *sub_seq = L"aaaa";
     
     recieved.packet = NULL;
@@ -879,39 +849,14 @@ static DWORD packet_receive_dns(Remote *remote, Packet **packet)
 
                     memset(localPacket, 0, sizeof(Packet));
                     
-                    // If the connection has an established cipher and this packet is not
-                    // plaintext, decrypt
-                    if ((crypto = remote_get_cipher(remote)) &&
-                        (packet_get_type(localPacket) != PACKET_TLV_TYPE_PLAIN_REQUEST) &&
-                        (packet_get_type(localPacket) != PACKET_TLV_TYPE_PLAIN_RESPONSE))
-                    {
-                        ULONG origPayloadLength = payloadLength;
-                        PUCHAR origPayload = payload;
-                        dprintf("[PACKET RECEIVE DNS] decrypting");
-                        // Decrypt
-                        if ((res = crypto->handlers.decrypt(crypto, payload, payloadLength, &payload, &payloadLength)) != ERROR_SUCCESS)
-                        {
-                            SetLastError(res);
-                        }
-
-                        // We no longer need the encrypted payload
-                        free(origPayload);
-                    } else 
-                    {
-                        dprintf("[PACKET RECEIVE DNS] plain-text");
-                        res = ERROR_SUCCESS;
-                    }
-                    
-                    if (res == ERROR_SUCCESS) {
-                        localPacket->header.length = header.length;
-                        localPacket->header.type = header.type;
-                        localPacket->payload = payload;
-                        localPacket->payloadLength = payloadLength;
+                    localPacket->header.length = header.length;
+                    localPacket->header.type = header.type;
+                    localPacket->payload = payload;
+                    localPacket->payloadLength = payloadLength;
                         
-                        *packet = localPacket;
-                        dprintf("[PACKET RECEIVE DNS] got packet: %x %x %x %x",localPacket->header.length, localPacket->header.type, localPacket->payload, localPacket->payloadLength );
-                        SetLastError(ERROR_SUCCESS);
-                    }
+                    *packet = localPacket;
+                    dprintf("[PACKET RECEIVE DNS] got packet: %x %x %x %x",localPacket->header.length, localPacket->header.type, localPacket->payload, localPacket->payloadLength );
+                    SetLastError(ERROR_SUCCESS);
                 }
             }
             
