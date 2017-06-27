@@ -528,7 +528,7 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
     memcpy(buffer, &packet->header, sizeof(PacketHeader));
     memcpy(buffer + sizeof(PacketHeader), packet->payload, packet->payloadLength);
     
-    size_t buffLen = packet->payloadLength + sizeof(PacketHeader);
+    DWORD  buffLen = packet->payloadLength + sizeof(PacketHeader);
     need_to_send = ((buffLen/5) + (buffLen % 5 > 0 ? 1 : 0)) * 8 ;
     
     base64 = (wchar_t *)calloc(need_to_send + 1, sizeof(wchar_t));
@@ -599,7 +599,7 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
             force_stop = FALSE;
 
             request = (wchar_t *)calloc(MAX_DNS_NAME_SIZE + 1, sizeof(wchar_t));
-            rest_len = MAX_DNS_NAME_SIZE - wcslen(domain) - 6 - wcslen(sub_c) - wcslen(idx_c);
+            rest_len = MAX_DNS_NAME_SIZE - ((DWORD)wcslen(domain)) - 6 - ((DWORD)wcslen(sub_c)) - ((DWORD)wcslen(idx_c));
             rest_len = min(rest_len, need_to_send - current_sent);
             parts = rest_len / (MAX_DNS_SUBNAME_SIZE + 1);
             parts_last = rest_len % (MAX_DNS_SUBNAME_SIZE + 1);
