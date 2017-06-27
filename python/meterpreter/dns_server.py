@@ -295,11 +295,13 @@ class Client(object):
                 if data is not None:
                     self.logger.info("There are new data for sending to client")
                     self.send_data = data
+                    self.enc_send_data = ""
             data_size = len(self.send_data)
             if data_size != 0:
                 next_sub = IPv6Encoder.get_next_sdomain(self.sub_domain)
                 sub_domain = next_sub
-                self.enc_send_data = IPv6Encoder.encode_data(self.send_data)
+                if not self.enc_send_data:
+                    self.enc_send_data = IPv6Encoder.encode_data(self.send_data)
                 self.send_indexes = set()
                 #self.send_data = ""
             else:
@@ -309,7 +311,7 @@ class Client(object):
         else:
             self.logger.info("Subdomain is different %s(request) - %s(client)", sub_domain, self.sub_domain)
             if sub_domain == "aaaa":
-                self.logger.info("MIGRATE. Not DONE")
+                self.logger.info("MIGRATE.")
                 self.sub_domain = sub_domain
                 self.send_data = ""
                 self.enc_send_data = ""
@@ -790,8 +792,8 @@ def main():
 
     logger.info("Starting nameserver...")
 
-    servers.append(SocketServer.ThreadingUDPServer(('', args.dport), UDPRequestHandler))
-    servers.append(SocketServer.ThreadingTCPServer(('', args.dport), TCPRequestHandler))
+    servers.append(SocketServer.UDPServer(('', args.dport), UDPRequestHandler))
+    servers.append(SocketServer.TCPServer(('', args.dport), TCPRequestHandler))
 
     for s in servers:
         thread = threading.Thread(target=s.serve_forever)  # that thread will start one more thread for each request
