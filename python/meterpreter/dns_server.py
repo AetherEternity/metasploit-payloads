@@ -558,6 +558,7 @@ class MSFClient(object):
             self._setup_ssl()
         else:
             MSFClient.LOGGER.info("STAGE0 mode ready")
+            #self._setup_ssl()
     def get_socket(self):
         return self.ssl_socket if self.ssl_socket else self.sock
 
@@ -581,6 +582,7 @@ class MSFClient(object):
     def _read_data(self, size):
         data = None
         try:
+            MSFClient.LOGGER.info("Reading %d", size)
             data = self.get_socket().recv(size)
             if not data and self.stageles:
                 MSFClient.LOGGER.info("SSL connection closed by client")
@@ -602,14 +604,18 @@ class MSFClient(object):
     def need_read(self):
         if self.state == MSFClient.INITIAL:
             # read header
-            header = self._read_data( MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE)
-
+            header = self._read_data( (MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE))
+            
             if header is None:
+                MSFClient.LOGGER.info("Empty header")
+                time.sleep(5)
                 return
-
-            if (len(header) !=  MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE):
+            
+            if (len(header) !=  (MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE)):
                 MSFClient.LOGGER.error("Can't read full header)")
+                time.sleep(5)
                 return
+                
             MSFClient.LOGGER.debug("PARSE HEADER")
             
             if self.stageles:
@@ -620,12 +626,13 @@ class MSFClient(object):
                 self.need_read_size = pkt_length
                 self.data = header
             else:
-                self.need_read_size = header[:4][::-1]
+                self.need_read_size = struct.unpack('>I',header[:4][::-1])[0]
                 MSFClient.LOGGER.info("STAGE0 incoming packet - need to read %d data", self.need_read_size)
                 
             # try read immediately
             data = self._read_data(self.need_read_size)
             if data is None:
+                time.sleep(5)
                 return
             self.data += data
             self.need_read_size -= len(data)
@@ -633,14 +640,17 @@ class MSFClient(object):
             if self.need_read_size == 0:
                 self.send_to_client(self.client_id)       
         else:
+            MSFClient.LOGGER.info(" -no")
             data = self._read_data(self.need_read_size)
             if data is None:
+                time.sleep(5)
                 return
             self.data += data
             self.need_read_size -= len(data)
 
             if self.need_read_size == 0:
                 self.send_to_client(self.client_id)
+        time.sleep(5)
 
     def want_write(self):
         client = get_client_by_id(self.client_id)
@@ -801,7 +811,7 @@ def main():
     ns_records.append(NS(D.ns1))
     ns_records.append(NS(D.ns2))
     
-    payload_type = True if args.type.find('single') else False
+    payload_type = True if args.type.find('single')>=0 else False
     logger.info("Stageless mode: %s", payload_type)
     client = Client('a') # TODO: multiclient support?
     
