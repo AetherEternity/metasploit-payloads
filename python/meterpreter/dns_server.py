@@ -544,7 +544,7 @@ class MSFClient(object):
 
     def __init__(self, sock, server, stageles):
         self.sock = sock
-        seld.stageles =  stageles
+        self.stageles =  stageles
         self.ssl_socket = None
         self.data = ""
         self.need_read_size = 0
@@ -602,17 +602,17 @@ class MSFClient(object):
     def need_read(self):
         if self.state == MSFClient.INITIAL:
             # read header
-            header = self._read_data( self.stageles ? MSFClient.HEADER_SIZE : MSFClient.HEADER_STAGE_SIZE)
+            header = self._read_data( MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE)
 
             if header is None:
                 return
 
-            if (len(header) != self.stageles ? MSFClient.HEADER_SIZE : MSFClient.HEADER_STAGE_SIZE):
+            if (len(header) !=  MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE):
                 MSFClient.LOGGER.error("Can't read full header)")
                 return
             MSFClient.LOGGER.debug("PARSE HEADER")
             
-            if self.stagles:
+            if self.stageles:
                 xor_key = header[:4][::-1]
                 header_length = xor_bytes(xor_key, header[4:8])
                 pkt_length = struct.unpack('>I', header_length)[0] - 4
@@ -621,7 +621,7 @@ class MSFClient(object):
                 self.data = header
             else:
                 self.need_read_size = header[:4][::-1]
-                MSFClient.LOGGER.info("STAGE0 incoming packet - need to read %d data", self.need_read_size")
+                MSFClient.LOGGER.info("STAGE0 incoming packet - need to read %d data", self.need_read_size)
                 
             # try read immediately
             data = self._read_data(self.need_read_size)
@@ -684,7 +684,7 @@ class MSFClient(object):
 class Server(object):
     SELECT_TIMEOUT = 10
 
-    def __init__(self, listen_addr="0.0.0.0", listen_port=4444):
+    def __init__(self, listen_addr="0.0.0.0", listen_port=4444, payload_type=False):
         self.stageles = payload_type
         self.listen_addr = listen_addr
         self.listen_port = listen_port
@@ -801,9 +801,9 @@ def main():
     ns_records.append(NS(D.ns1))
     ns_records.append(NS(D.ns2))
     
-    payload_type = args.type.find('sigle') ? True : False
-    
-    client = Client('a', payload_type) # TODO: multiclient support?
+    payload_type = True if args.type.find('single') else False
+    logger.info("Stageless mode: %s", payload_type)
+    client = Client('a') # TODO: multiclient support?
     
     dns_server = DnsServer(args.domain, args.ipaddr, ns_records)
     server = Server('0.0.0.0', args.lport, payload_type)
