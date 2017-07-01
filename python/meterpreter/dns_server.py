@@ -379,7 +379,7 @@ class Request(object):
 
 
 class GetDataHeader(Request):
-    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.g\.(?P<rnd>\d+)\.(?P<client>\w)")
+    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.(g|000g)\.(?P<rnd>\d+)\.(?P<client>\w)")
 
     @classmethod
     def _handle_client(cls, client, match_data):
@@ -501,6 +501,7 @@ class DnsServer(object):
 
 def dns_response(data):
     try:
+        #logger.info("DATA:" + str(len(data))+ " " + str(data))
         request = DNSRecord.parse(data)
         if dns_server:
             return dns_server.process_request(request)
@@ -508,7 +509,7 @@ def dns_response(data):
             logger.error("Dns server is not created.")
             return None
     except Exception as e:
-        logger.error("Parse error " + str(e), exc_info=True)
+        logger.error("Parse error " + str(e) , exc_info=True)
         return None
 
 
@@ -608,12 +609,10 @@ class MSFClient(object):
             
             if header is None:
                 MSFClient.LOGGER.info("Empty header")
-                time.sleep(5)
                 return
             
             if (len(header) !=  (MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE)):
                 MSFClient.LOGGER.error("Can't read full header)")
-                time.sleep(5)
                 return
                 
             MSFClient.LOGGER.debug("PARSE HEADER")
@@ -632,7 +631,6 @@ class MSFClient(object):
             # try read immediately
             data = self._read_data(self.need_read_size)
             if data is None:
-                time.sleep(5)
                 return
             self.data += data
             self.need_read_size -= len(data)
@@ -643,14 +641,12 @@ class MSFClient(object):
             MSFClient.LOGGER.info(" -no")
             data = self._read_data(self.need_read_size)
             if data is None:
-                time.sleep(5)
                 return
             self.data += data
             self.need_read_size -= len(data)
 
             if self.need_read_size == 0:
                 self.send_to_client(self.client_id)
-        time.sleep(5)
 
     def want_write(self):
         client = get_client_by_id(self.client_id)
@@ -774,7 +770,7 @@ class Server(object):
 
 class TCPRequestHandler(BaseRequestHandlerDNS):
     def get_data(self):
-        data = self.request.recv(8192).strip()
+        data = self.request.recv(8192)#.strip()
         sz = struct.unpack('>H', data[:2])[0]
         if sz < len(data) - 2:
             raise Exception("Wrong size of TCP packet")
@@ -789,7 +785,7 @@ class TCPRequestHandler(BaseRequestHandlerDNS):
 
 class UDPRequestHandler(BaseRequestHandlerDNS):
     def get_data(self):
-        return self.request[0].strip()
+        return self.request[0]#.strip()
 
     def send_data(self, data):
         return self.request[1].sendto(data, self.client_address)
