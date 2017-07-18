@@ -7,6 +7,7 @@
 
 /*! @brief This is the size of the certificate hash that is validated (sha1) */
 #define CERT_HASH_SIZE 20
+#define CLIENT_ID_SIZE 2
 #define URL_SIZE 512
 #define UA_SIZE 256
 #define UUID_SIZE 16
@@ -47,6 +48,7 @@ typedef struct _MetsrvTransportCommonDns
 	int comms_timeout;                    ///! Number of sessions to wait for a new packet.
 	int retry_total;                      ///! Total seconds to retry comms for.
 	int retry_wait;                       ///! Seconds to wait between reconnects.
+	wchar_t char client_id;  
 } MetsrvTransportCommonDns;
 
 typedef struct _MetsrvTransportProxy
@@ -68,7 +70,7 @@ typedef struct _MetsrvTransportDns
 {
 	MetsrvTransportCommon common;
 	CHARTYPE ns_server[255];
-	//DWORD type;
+	wchar_t char client_id;
 } MetsrvTransportDns;
 
 typedef struct _MetsrvTransportTcp

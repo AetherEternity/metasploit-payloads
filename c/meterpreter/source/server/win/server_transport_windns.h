@@ -10,6 +10,8 @@
 #include <windns.h>
 #pragma comment (lib, "Dnsapi.lib")
 
+
+
 #pragma pack(push, 1)
 typedef struct _IncapuslatedDns
 {

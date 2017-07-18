@@ -234,6 +234,7 @@ typedef struct _DnsTransportContext
 	BOOL ready; 
 	wchar_t *domain;                         ///! Pointer to the DNS domain stored with the transport.
 	wchar_t *ns_server;
+    wchar_t client_id;
 	USHORT counter;
 	DWORD type;
 	PVOID pip4;

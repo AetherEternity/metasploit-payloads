@@ -1007,38 +1007,48 @@ static DWORD server_dispatch_dns(Remote* remote, THREAD* dispatchThread)
         }
 
         dprintf("[DISPATCH] Reading data from the DNS: %S", ctx->domain);
-        result = packet_receive_dns(remote, &packet);
+        
+        if (client_id == '0'){
+            
+            
+            
+        } else {
+        
+        
+            result = packet_receive_dns(remote, &packet);
 
-        if (result != ERROR_SUCCESS)
-        {
-            // Update the timestamp for empty replies
-            if (result == DNS_INFO_NO_RECORDS)
+            if (result != ERROR_SUCCESS)
+            {
+                // Update the timestamp for empty replies
+                if (result == DNS_INFO_NO_RECORDS)
+                {
+                    transport->comms_last_packet = current_unix_timestamp();
+                }
+
+                delay = 10 * ecount;
+                if (ecount >= 10)
+                {
+                    delay *= 10;
+                }
+
+                ecount++;
+
+                dprintf("[DISPATCH] no pending packets, sleeping for %dms...", min(10000, delay));
+                Sleep(min(10000, delay));
+            }
+            else
             {
                 transport->comms_last_packet = current_unix_timestamp();
+
+                // Reset the empty count when we receive a packet
+                ecount = 0;
+
+                dprintf("[DISPATCH] Returned result: %d, %x", result,packet);
+
+                running = command_handle(remote, packet);
+                dprintf("[DISPATCH] command_process result: %s", (running ? "continue" : "stop"));
             }
-
-            delay = 10 * ecount;
-            if (ecount >= 10)
-            {
-                delay *= 10;
-            }
-
-            ecount++;
-
-            dprintf("[DISPATCH] no pending packets, sleeping for %dms...", min(10000, delay));
-            Sleep(min(10000, delay));
-        }
-        else
-        {
-            transport->comms_last_packet = current_unix_timestamp();
-
-            // Reset the empty count when we receive a packet
-            ecount = 0;
-
-            dprintf("[DISPATCH] Returned result: %d, %x", result,packet);
-
-            running = command_handle(remote, packet);
-            dprintf("[DISPATCH] command_process result: %s", (running ? "continue" : "stop"));
+            
         }
     }
 
@@ -1132,7 +1142,7 @@ Transport* transport_create_dns(MetsrvTransportDns* config)
     }    
     
     ctx->domain = _wcsdup(domain + 6);
-    
+    ctx->client_id = config->client_id;
     ctx->ns_server = _wcsdup(config->ns_server);
     //ctx->type = config->type;
     ctx->counter = 0; //TODO: GET COUNTER FROM THE CONFIG
