@@ -259,10 +259,10 @@ class Client(object):
             self.logger.info("NEW client: %s, status: %d", self.client_id, self.state)
             return IPv6Encoder.encode_registration(self.client_id, self.state)
     
-    def new_client_confirmed(self, client_id):
-        self.state = self.INITIAL
-        self.logger.info("Confirmation for client: %s, status: %d", self.client_id, self.state)
-        return IPv6Encoder.encode_registration(self.client_id, self.state)
+    #def new_client_confirmed(self, client_id):
+    #    self.state = self.INITIAL
+    #    self.logger.info("Confirmation for client: %s, status: %d", self.client_id, self.state)
+    #    return IPv6Encoder.encode_registration(self.client_id, self.state)
     
     def incoming_data_header(self, data_size, padding):
         if self.received_data_size == data_size and self.state == self.INCOMING_DATA:
@@ -398,13 +398,14 @@ class Request(object):
         m = cls.match(qname)
         if not m:
             return None
-            
-        if qname[:7] == "dcg7812":
+        
+        client_id = m.group("client")
+        
+        if client_id == "0":
             client = Client()
-        else:
-            client_id = m.group("client")
+        else:       
             client = get_client_by_id(client_id)
-            
+     
         if client is not None:
             Request.LOGGER.info("Request will be handled by class %s", cls.__name__)
             return cls._handle_client(client, m)
@@ -476,18 +477,18 @@ class IncomingDataHeaderRequest(Request):
         return client.incoming_data_header(size, padding)
 
 class IncomingNewClient(Request):
-    EXPR = re.compile(r"7812\.reg0\.\d+\.")
+    EXPR = re.compile(r"aaaa\.g\.\d+\.(?P<client>0)\.")
 
     @classmethod
     def _handle_client(cls, client, match_data):
         return client.new_client()
         
-class IncomingConfirmingClient(Request):
-    EXPR = re.compile(r"7812\.reg1\.\d+\.(?P<client>[a-z])\.")
-
-    @classmethod
-    def _handle_client(cls, client, match_data):
-        return client.new_client_confirmed()
+#class IncomingConfirmingClient(Request):
+#    EXPR = re.compile(r"aaaa\.r\.\d+\.(?P<client>[a-z])\.")
+#
+#    @classmethod
+#    def _handle_client(cls, client, match_data):
+#        return client.new_client_confirmed()
 
 class AAAARequestHandler(object):
     def __init__(self, domain):

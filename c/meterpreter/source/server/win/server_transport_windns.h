@@ -51,6 +51,7 @@ typedef struct _DNSThreadParams
     int index_stop;
 	wchar_t *subd;
 	wchar_t *domain;
+    wchar_t *client_id;
 	PIP4_ARRAY pSrvList;
 	UINT size;
     UINT status;

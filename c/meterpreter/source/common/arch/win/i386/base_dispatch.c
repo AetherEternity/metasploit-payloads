@@ -199,8 +199,14 @@ DWORD remote_request_core_transport_list(Remote* remote, Packet* packet)
 				{
 					packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_NSHOST, ctx->ns_server);
 				}
-                packet_add_tlv_raw(transportGroup, TLV_TYPE_TRANS_CLIENT_ID, ctx->client_id, CLIENT_ID_SIZE);
-                
+                if (ctx->client_id)
+				{
+                    packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_CLIENT_ID, ctx->client_id);
+                } 
+                if (ctx->server_id)
+				{
+                    packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_SERVER_ID, ctx->server_id);
+                }
             }
 
 			packet_add_group(response, TLV_TYPE_TRANS_GROUP, transportGroup);
