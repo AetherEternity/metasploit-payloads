@@ -333,7 +333,9 @@ class Registrator(object):
 
     def subscribe(self, server_id, server):
         with self.lock:
-            self.waited_servers[server_id] = self.waited_servers.get(server_id, []).append(server)
+            server_lst = self.waited_servers.get(server_id, [])
+            server_lst.append(server)
+            self.waited_servers[server_id] = server_lst
         self.logger.info("Subscription is done for server with %s id.", server_id)
 
     def unsubscribe(self, server_id, server):
@@ -840,10 +842,8 @@ class MSFClient(object):
 
     def new_client(self):
         if self.state == MSFClient.WAIT_CLIENT:
-            MSFClient.LOGGER.info("New MSF Client %d", self.msf_id)
             client = Registrator.instance().get_new_client_for_server(self.msf_id)
             if client:
-                MSFClient.LOGGER.info("MSF Client, with %c", client.get_id() )
                 self.client = client
                 client.set_server(self)
                 self._setup_ssl()
