@@ -327,7 +327,7 @@ class Registrator(object):
             if waited_lst:
                 notify_server = waited_lst.pop(0)
                 if not waited_lst:
-                    del self.servers[server_id]
+                    del self.waited_servers[server_id]
         if notify_server:
             notify_server.new_client()
 
@@ -340,7 +340,7 @@ class Registrator(object):
 
     def unsubscribe(self, server_id, server):
         with self.lock:
-            waited_lst = self.servers.get(server_id, [])
+            waited_lst = self.waited_servers.get(server_id, [])
             if waited_lst:
                 i = waited_lst.find(server)
                 if i != -1:
@@ -955,7 +955,10 @@ class MSFListener(object):
         self.loop_thread = None
 
     def remove_me(self, client):
-        self.clients.remove(client)
+        try:
+            self.clients.remove(client)
+        except:
+            pass
 
     def poll(self):
         self.poll_pipe[1].write("\x90")
