@@ -872,6 +872,7 @@ class MSFClient(object):
                     else:
                         Registrator.instance().subscribe(self.msf_id, self)
                         self.state = MSFClient.WAIT_CLIENT
+                        return
                 else:
                     self.LOGGER.error("Incorrect server id data.Closing socket.")
                     self.sock.close()
