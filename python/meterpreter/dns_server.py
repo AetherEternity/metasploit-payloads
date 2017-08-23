@@ -15,6 +15,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 import socket
 import select
+from contextlib import contextmanager
 
 try:
     from dnslib import *
@@ -59,6 +60,14 @@ def pack_ushort_to_hn(val):
 
 def xor_bytes(key, data):
     return ''.join(chr(ord(data[i]) ^ ord(key[i % len(key)])) for i in range(len(data)))
+
+
+@contextmanager
+def ignored(*exceptions):
+    try:
+        yield
+    except exceptions:
+        pass
 
 
 class DomainName(str):
@@ -160,46 +169,6 @@ class IPv6Encoder(Encoder):
     @staticmethod
     def encode_data_header(sub_domain, data_size):
         return [IPv6Encoder.hextets_to_str(IPv6Encoder._encode_nextdomain_datasize(sub_domain, data_size))]
-
-    @staticmethod
-    def encode_data(data):
-        logger.info("Encoding data...")
-        ipv6blocks = []  # Block of IPv6 addresses
-        data_size = len(data)
-        logger.debug("Data size - %d bytes", data_size)
-        index = 0
-        while index < data_size:
-            block = []
-            next_index = index + IPv6Encoder.MAX_PACKET_SIZE
-            if next_index < data_size:
-                # full block
-                for i in range(IPv6Encoder.MAX_IPV6RR_NUM):
-                    is_last = (i == (IPv6Encoder.MAX_IPV6RR_NUM - 1))
-                    cur_pos = index + i * IPv6Encoder.MAX_DATA_IN_RR
-                    hextets = IPv6Encoder._encode_data_prefix(0xfe if is_last else 0xff,
-                                                              i, data[cur_pos:cur_pos + IPv6Encoder.MAX_DATA_IN_RR])
-                    block.append(IPv6Encoder.hextets_to_str(hextets))
-            else:
-                # partial block
-                i = 0
-                block_size = data_size - index
-                while i < block_size:
-                    next_i = i + IPv6Encoder.MAX_DATA_IN_RR
-                    if next_i > block_size:
-                        next_i = block_size
-                    num_rr = i // IPv6Encoder.MAX_DATA_IN_RR
-                    is_last = (num_rr == (IPv6Encoder.MAX_IPV6RR_NUM - 1))
-                    cur_pos = index + i
-                    hextets = IPv6Encoder._encode_data_prefix(0xfe if is_last else 0xff,
-                                                              num_rr, data[cur_pos:cur_pos + (next_i-i)])
-                    block.append(IPv6Encoder.hextets_to_str(hextets))
-                    i = next_i
-
-            ipv6blocks.append(block)
-            index = next_index
-        logger.info("Encoding done. %d ipv6 blocks generated", len(ipv6blocks))
-        logger.debug("IPv6Blocks data: %s", ipv6blocks)
-        return ipv6blocks
 
     @staticmethod
     def encode_packet(packet_data):
@@ -309,9 +278,7 @@ class Registrator(object):
             try:
                 client_id = self.id_list.pop(0)
                 self.clients[client_id] = client
-                client_lst = self.servers.get(server_id, [])
-                client_lst.append(client)
-                self.servers[server_id] = client_lst
+                self.servers.setdefault(server_id, []).append(client)
                 notify_server = True
             except IndexError as e:
                 self.logger.error("Can't register new client for server %s(no free ids)", server_id, exc_info=True)
@@ -333,9 +300,7 @@ class Registrator(object):
 
     def subscribe(self, server_id, server):
         with self.lock:
-            server_lst = self.waited_servers.get(server_id, [])
-            server_lst.append(server)
-            self.waited_servers[server_id] = server_lst
+            self.waited_servers.setdefault(server_id, []).append(server)
         self.logger.info("Subscription is done for server with %s id.", server_id)
 
     def unsubscribe(self, server_id, server):
@@ -344,36 +309,30 @@ class Registrator(object):
             if waited_lst:
                 i = waited_lst.find(server)
                 if i != -1:
+                    self.logger.debug("Server with %s id is found on index %d", server_id, i)
                     waited_lst.pop(i)
         self.logger.info("Unsubscription is done for server with %s id.", server_id)
 
-
     def get_client_by_id(self, client_id):
         with self.lock:
-            try:
+            with ignored(KeyError):
                 return self.clients[client_id]
-            except KeyError as e:
-                return None
 
     def get_new_client_for_server(self, server_id):
-        assigned_client = None
         with self.lock:
-            try:
+            with ignored(IndexError):
                 clients = self.servers.get(server_id, [])
                 assigned_client = clients.pop(0)
-                if len(clients) == 0:
+                if not clients:
                     del self.servers[server_id]
-            except IndexError as e:
-                pass
-        return assigned_client
+                return assigned_client
 
     def unregister_client(self, client_id):
         with self.lock:
-            try:
+            with ignored(KeyError):
                 del self.clients[client_id]
                 self.id_list.append(client_id)
-            except KeyError as e:
-                self.logger.error("Can't unregister client: client with id %s has not found", client_id)
+                self.logger.error("Unregister client with id %s successfully", client_id)
 
 
 class Client(object):
@@ -474,13 +433,12 @@ class Client(object):
     def request_data_header(self, sub_domain, encoder):
         if sub_domain == self.sub_domain:
             if not self.send_data:
-                try:
+                with ignored(Queue.Empty):
                     self.logger.info("Checking client queue...")
                     data = self.client_queue.get_nowait()
                     self.send_data = BlockSizedData(data, encoder.MAX_PACKET_SIZE)
-                    self.logger.debug("New data size is %d", len(data))
-                except Queue.Empty:
-                    pass
+                    self.logger.debug("New data found: size is %d", len(data))
+
             data_size = 0
             if self.send_data:
                 next_sub = encoder.get_next_sdomain(self.sub_domain)
@@ -493,12 +451,9 @@ class Client(object):
         else:
             self.logger.info("Subdomain is different %s(request) - %s(client)", sub_domain, self.sub_domain)
             if sub_domain == "aaaa":
-                self.logger.info("MIGRATE.")
-                self.sub_domain = sub_domain
-                self.send_data = None
-            else:
-                self.sub_domain = sub_domain
-                self.send_data = None
+                self.logger.info("MIGRATION.")
+            self.sub_domain = sub_domain
+            self.send_data = None
 
     def request_data(self, sub_domain, index, encoder):
         self.logger.debug("request_data - %s, %d", sub_domain, index)
@@ -523,13 +478,10 @@ class Client(object):
 
     def server_get_data(self, timeout=2):
         self.logger.info("Checking server queue...")
-        data = None
-        try:
+        with ignored(Queue.Empty):
             data = self.server_queue.get(True, timeout)
             self.logger.info("There are new data(length=%d) for the server", len(data))
-        except Queue.Empty:
-            pass
-        return data
+            return data
 
     def server_has_data(self):
         return not self.server_queue.empty()
@@ -553,20 +505,19 @@ class Request(object):
         params = m.groupdict()
         client = None
         client_id = params.pop("client", None)
-        if client_id is None:
+        if not client_id:
             if "new_client" in cls.OPTIONS:
                 Request.LOGGER.info("Create a new client.")
                 client = Client()
         else:
             client = Registrator.instance().get_client_by_id(client_id)
-        if client is not None:
+
+        if client:
             Request.LOGGER.info("Request will be handled by class %s", cls.__name__)
             params["encoder"] = dns_cls.encoder
-
             return cls._handle_client(client, **params)
         else:
             Request.LOGGER.error("Can't find client with name %s", client_id)
-        return None
 
     @classmethod
     def _handle_client(cls, client, **kwargs):
@@ -669,17 +620,15 @@ class AAAARequestHandler(object):
             return
         sub_domain = qname[:i]
         self.logger.info("requested subdomain name is %s", sub_domain)
-        is_handled = False
         for handler in self.request_handler:
             answer = handler.handle(sub_domain, self.__class__)
-            if answer is not None:
+            if answer:
                 for rr in answer:
                     self.logger.debug("Add resource record to the reply %s", rr)
                     reply.add_answer(RR(rname=qname, rtype=QTYPE.AAAA, rclass=1, ttl=1,
                                         rdata=AAAA(rr)))
-                is_handled = True
                 break
-        if not is_handled:
+        else:
             self.logger.error("Request with subdomain %s doesn't handled", qname)
 
 
@@ -692,7 +641,7 @@ class DnsServer(object):
             DnsServer.__instance = DnsServer(domain, ipv4, ns_servers)
 
     @staticmethod
-    def get_instance():
+    def instance():
         return DnsServer.__instance
 
     def __init__(self, domain, ipv4, ns_servers):
@@ -709,15 +658,14 @@ class DnsServer(object):
 
     def process_request(self, request):
         reply = DNSRecord(DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q)
-        qname = request.q.qname
-        qn = str(qname)
+        qn = str(request.q.qname)
         qtype = request.q.qtype
         qt = QTYPE[qtype]
         if qn.endswith(self.domain):
-            if qtype in self.handlers:
+            try:
                 self.logger.info("Process request for type %s", qt)
                 self.handlers[qtype](reply, qn)
-            else:
+            except KeyError as e:
                 self.logger.info("%s request type is not supported", qt)
         else:
             self.logger.info("DNS request for domain %s is not handled by this server. Sending empty answer.", qn)
@@ -734,21 +682,20 @@ class DnsServer(object):
         reply.add_answer(RR(rname=qname, rtype=QTYPE.A, rclass=1, ttl=1, rdata=A(self.ipv4)))
 
     def _process_aaaa_request(self, reply, qname):
-        if self.aaaa_handler is not None:
+        if self.aaaa_handler:
             self.aaaa_handler.process_request(reply, qname)
 
 
 def dns_response(data):
     try:
         request = DNSRecord.parse(data)
-        dns_server = DnsServer.get_instance()
+        dns_server = DnsServer.instance()
         if dns_server:
             return dns_server.process_request(request)
         else:
-            logger.error("Dns server is not created.")
+            logger.error("Can't get dns server instance.")
     except Exception as e:
-        logger.error("Parse error " + str(e), exc_info=True)
-    return None
+        logger.error("Exception during handle request " + str(e), exc_info=True)
 
 
 class BaseRequestHandlerDNS(SocketServer.BaseRequestHandler):
@@ -1068,9 +1015,8 @@ def main():
     listener.start_loop()
 
     logger.info("Starting nameserver ...")
-    servers = []
-    servers.append(SocketServer.UDPServer(('', args.dport), UDPRequestHandler))
-    servers.append(SocketServer.TCPServer(('', args.dport), TCPRequestHandler))
+    servers = [SocketServer.UDPServer(('', args.dport), UDPRequestHandler),
+               SocketServer.TCPServer(('', args.dport), TCPRequestHandler)]
 
     for s in servers:
         thread = threading.Thread(target=s.serve_forever)  # that thread will start one more thread for each request
