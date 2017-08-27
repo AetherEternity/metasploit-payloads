@@ -265,11 +265,13 @@ class Registrator(object):
 
     def __init__(self):
         self.id_list = [chr(i) for i in range(ord('a'), ord('z')+1)]
-        self.clients = {}
+        self.clientMap = {}
         self.servers = {}
+        self.stagers = {}
         self.waited_servers = {}
         self.lock = threading.Lock()
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.default_stager = StageClient()
 
     def register_client_for_server(self, server_id, client):
         client_id = None
@@ -277,7 +279,7 @@ class Registrator(object):
         with self.lock:
             try:
                 client_id = self.id_list.pop(0)
-                self.clients[client_id] = client
+                self.clientMap[client_id] = client
                 self.servers.setdefault(server_id, []).append(client)
                 notify_server = True
             except IndexError as e:
@@ -296,7 +298,7 @@ class Registrator(object):
                 if not waited_lst:
                     del self.waited_servers[server_id]
         if notify_server:
-            notify_server.new_client()
+            notify_server.on_new_client()
 
     def subscribe(self, server_id, server):
         with self.lock:
@@ -316,7 +318,7 @@ class Registrator(object):
     def get_client_by_id(self, client_id):
         with self.lock:
             with ignored(KeyError):
-                return self.clients[client_id]
+                return self.clientMap[client_id]
 
     def get_new_client_for_server(self, server_id):
         with self.lock:
@@ -327,10 +329,32 @@ class Registrator(object):
                     del self.servers[server_id]
                 return assigned_client
 
+    def get_stage_client_for_server(self, server_id):
+        with self.lock:
+            try:
+                return self.stagers[server_id]
+            except KeyError:
+                self.logger.info("Trying to request stager for server with %s id", server_id)
+                waited_lst = self.waited_servers.get(server_id, [])
+                if waited_lst:
+                    server = waited_lst[0]
+                    server.request_stage()
+                else:
+                    self.logger.info("Server list is empty")
+                return self.default_stager
+
+    def add_stager_for_server(self, server_id, data):
+        with self.lock:
+            self.stagers[server_id] = StageClient(data)
+
+    def is_stager_server(self, server_id):
+        with self.lock:
+            return server_id in self.stagers
+
     def unregister_client(self, client_id):
         with self.lock:
             with ignored(KeyError):
-                del self.clients[client_id]
+                del self.clientMap[client_id]
                 self.id_list.append(client_id)
                 self.logger.error("Unregister client with id %s successfully", client_id)
 
@@ -423,7 +447,7 @@ class Client(object):
                 self._initial_state()
                 if self.server:
                     self.logger.info("Notify server")
-                    self.server.notify_data()
+                    self.server.polling()
             except Exception:
                 self.logger.error("Error during decode received data", exc_info=True)
                 self._initial_state()
@@ -487,6 +511,29 @@ class Client(object):
         return not self.server_queue.empty()
 
 
+class StageClient(object):
+    subdomain = '7812'
+
+    def __init__(self, data=None):
+        self.stage_data = data
+        self.data_len = len(data) if data else 0
+        self.encoder_data = {}
+
+    def request_data_header(self, encoder):
+        return encoder.encode_data_header(self.subdomain, self.data_len)
+
+    def request_data(self, index, encoder):
+        if not self.stage_data:
+            return encoder.encode_finish_send()
+        
+        send_data = self.encoder_data.get(encoder, None)
+        if not send_data:
+            send_data = BlockSizedData(self.stage_data, encoder.MAX_PACKET_SIZE)
+            self.encoder_data[encoder] = send_data
+        _, data = self.stage_data.get_data(index)
+        return encoder.encode_packet(data)
+
+
 class Request(object):
     EXPR = None
     OPTIONS = []
@@ -510,7 +557,8 @@ class Request(object):
                 Request.LOGGER.info("Create a new client.")
                 client = Client()
         else:
-            client = Registrator.instance().get_client_by_id(client_id)
+            client = Registrator.instance().get_stage_client_for_server(client_id) if "stage_client" in cls.OPTIONS else \
+                     Registrator.instance().get_client_by_id(client_id)
 
         if client:
             Request.LOGGER.info("Request will be handled by class %s", cls.__name__)
@@ -535,12 +583,13 @@ class GetDataHeader(Request):
 
 
 class GetStageHeader(Request):
-    EXPR = re.compile(r"7812\.000g\.(?P<rnd>\d+)\.")
+    EXPR = re.compile(r"7812\.000g\.(?P<rnd>\d+)\.(?P<client>\w)")
+    OPTIONS = ["stage_client"]
 
     @classmethod
     def _handle_client(cls, client, **kwargs):
-        sub_domain = '7812'
-        return client.request_data_header(sub_domain)
+        encoder = kwargs['encoder']
+        return client.request_data_header(encoder)
 
 
 class GetDataRequest(Request):
@@ -555,13 +604,14 @@ class GetDataRequest(Request):
 
 
 class GetStageRequest(Request):
-    EXPR = re.compile(r"7812\.(?P<index>\d+)\.(?P<rnd>\d+)\.")
+    EXPR = re.compile(r"7812\.(?P<index>\d+)\.(?P<rnd>\d+)\.(?P<client>\w)")
+    OPTIONS = ["stage_client"]
 
     @classmethod
     def _handle_client(cls, client, **kwargs):
-        sub_domain = '7812'
         index = int(kwargs['index'])
-        return client.request_data(sub_domain, index)
+        encoder = kwargs['encoder']
+        return client.request_data(index, encoder)
 
 
 class IncomingDataRequest(Request):
@@ -604,7 +654,7 @@ class AAAARequestHandler(object):
         self.domain = domain
         self.logger = logging.getLogger(self.__class__.__name__)
         # self.logger.setLevel(logging.DEBUG)
-        self.request_handler = [
+        self.handlers_chain = [
             IncomingDataHeaderRequest,
             IncomingDataRequest,
             GetDataRequest,
@@ -620,14 +670,15 @@ class AAAARequestHandler(object):
             return
         sub_domain = qname[:i]
         self.logger.info("requested subdomain name is %s", sub_domain)
-        for handler in self.request_handler:
+        for handler in self.handlers_chain:
             answer = handler.handle(sub_domain, self.__class__)
-            if answer:
-                for rr in answer:
-                    self.logger.debug("Add resource record to the reply %s", rr)
-                    reply.add_answer(RR(rname=qname, rtype=QTYPE.AAAA, rclass=1, ttl=1,
-                                        rdata=AAAA(rr)))
-                break
+            if not answer:
+                continue
+            for rr in answer:
+                self.logger.debug("Add resource record to the reply %s", rr)
+                reply.add_answer(RR(rname=qname, rtype=QTYPE.AAAA, rclass=1, ttl=1,
+                                    rdata=AAAA(rr)))
+            break
         else:
             self.logger.error("Request with subdomain %s doesn't handled", qname)
 
@@ -718,14 +769,44 @@ class BaseRequestHandlerDNS(SocketServer.BaseRequestHandler):
             logger.error("Exception in request handler.", exc_info=True)
 
 
+class PartedDataReader(object):
+    INITIAL = 1
+    RECEIVING_DATA = 2
+
+    def __init__(self, read_func, header_func=None, completion_func=None, continue_func=None):
+        self.read_func = read_func
+        self.header_func = header_func
+        self.completion_func = completion_func
+        self.continue_func = continue_func
+        self.state = PartedDataReader.INITIAL
+        self.data = None
+
+    def read(self):
+        if self.state == PartedDataReader.INITIAL:
+            data_size, data = self.header_func()
+            if data_size == 0:
+                return
+            self.state = PartedDataReader.RECEIVING_DATA
+            self.data = PartedData(data_size)
+            if data:
+                self.data.add_part(data)
+        data = self.read_func(self.data.remain_size())
+        if not data:
+            return
+        self.data.add_part(data)
+        if self.data.is_complete():
+            if self.completion_func:
+                self.completion_func(self.data)
+            self.data = None
+            self.state = PartedDataReader.INITIAL
+        elif self.continue_func:
+            self.continue_func()
+
+
+
 class MSFClient(object):
     HEADER_SIZE = 8
     BUFFER_SIZE = 2048
-
-    INITIAL = 1
-    WAIT_CLIENT = 2
-    IDLE = 3
-    RECEIVING_DATA = 4
 
     LOGGER = logging.getLogger("MSFClient")
 
@@ -733,14 +814,17 @@ class MSFClient(object):
         self.sock = sock
         self.ssl_socket = None
         self.working_socket = sock
-        self.msf_data = PartedData()
-        self.state = MSFClient.INITIAL
         self.server = server
         self.msf_id = ""
         self.client = None
+        self.wait_client = False
+        self.stage_requested = False
+        self.lock = threading.Lock()
+        self.parted_reader = None
+        self._setup_id_reader()
 
     def get_socket(self):
-        return self.working_socket if self.state != self.WAIT_CLIENT else None
+        return self.working_socket if not self.wait_client else None
 
     def _setup_ssl(self):
         if self.ssl_socket is None:
@@ -787,94 +871,131 @@ class MSFClient(object):
             MSFClient.LOGGER.error("Exception during read", exc_info=True)
             return None
 
-    def new_client(self):
-        if self.state == MSFClient.WAIT_CLIENT:
-            client = Registrator.instance().get_new_client_for_server(self.msf_id)
-            if client:
-                self.client = client
-                client.set_server(self)
-                self._setup_ssl()
-                self.state = MSFClient.IDLE
-                Registrator.instance().unsubscribe(self.msf_id, self)
-                self.notify_data()
+    def on_new_client(self):
+        with self.lock:
+            if not self.client:
+                if self._setup_client():
+                    self._setup_ssl()
+                    self._setup_tlv_reader()
+                    Registrator.instance().unsubscribe(self.msf_id, self)
+                    self.wait_client = False
+                    self.polling()
+            else:
+                self.LOGGER.error("Client already exists for this server")
+
+    def request_stage(self):
+        with self.lock:
+            if not self.stage_requested:
+                self._setup_stage_reader()
+                self.stage_requested = True
+                self.wait_client = False
+                self.polling()
+            else:
+                MSFClient.LOGGER.info("Stage has already was requested on this server")
+
+    def _setup_id_reader(self):
+        self.parted_reader = PartedDataReader(read_func=self._read_data,
+                                              header_func=self._read_id_header,
+                                              completion_func=self._read_id_complete
+                                              )
+
+    def _setup_tlv_reader(self):
+        self.parted_reader = PartedDataReader(read_func=self._read_data,
+                                              header_func=self._read_tlv_header,
+                                              completion_func=self._read_tlv_complete
+                                              )
+
+    def _setup_stage_reader(self, without_completion=False):
+        self.parted_reader = PartedDataReader(read_func=self._read_data,
+                                              header_func=self._read_stage_header,
+                                              completion_func=self._read_stage_complete if not without_completion else None
+                                              )
+
+    def _read_id_header(self):
+        id_size_byte = self._read_data(1)
+        id_size = struct.unpack("B", id_size_byte)[0]
+        return id_size, None
+
+    def _read_id_complete(self, data):
+        MSFClient.LOGGER.info("Id read is done")
+        self.msf_id = data.get_data()
+        if Registrator.instance().is_stager_server(self.msf_id):
+            MSFClient.LOGGER.info("Start reading stage without sending to client")
+            self._setup_stage_reader(without_completion=True)
+        elif self._setup_client():
+            MSFClient.LOGGER.info("Client is found.Setup tlv reader.")
+            self._setup_ssl()
+            self._setup_tlv_reader()
         else:
-            self.LOGGER.error("Bad state(%d) for new client", self.state)
+            MSFClient.LOGGER.info("There are no clients for server id %s. Create subscription", self.msf_id)
+            Registrator.instance().subscribe(self.msf_id, self)
+            self.parted_reader = None
+            self.wait_client = True
+
+    def _read_stage_header(self):
+        MSFClient.LOGGER.info("Start reading stager")
+        data_size_b = self._read_data(4)
+        data_size = struct.unpack("I>", data_size_b)[0]
+        return data_size+4, data_size_b
+
+    def _read_stage_complete(self, data):
+        MSFClient.LOGGER.info("Stage read is done")
+        Registrator.instance().add_stager_for_server(self.msf_id, data.get_data())
+        self.parted_reader = None
+        self.wait_client = True
+
+    def _read_tlv_header(self):
+        header = self._read_data(MSFClient.HEADER_SIZE)
+        if not header:
+            return 0, None
+
+        if len(header) != MSFClient.HEADER_SIZE:
+            MSFClient.LOGGER.error("Can't read full header)")
+            return 0, None
+
+        MSFClient.LOGGER.debug("PARSE HEADER")
+        xor_key = header[:4][::-1]
+        pkt_length_binary = xor_bytes(xor_key, header[4:8])
+        pkt_length = struct.unpack('>I', pkt_length_binary)[0]
+        return pkt_length+4, header
+
+    def _read_tlv_complete(self, data):
+        MSFClient.LOGGER.info("All data from server is read. Sending to client.")
+        if self.client:
+            self.client.server_put_data(data.get_data())
+        else:
+            MSFClient.LOGGER.error("Client for server id %s is not found.Dropping data", self.msf_id)
+
+    def _setup_client(self):
+        """
+        Check if client is exists for this server and setup server-client links
+        :return: True if client is found and False otherwise
+        """
+        if not self.msf_id:
+            return False
+        client = Registrator.instance().get_new_client_for_server(self.msf_id)
+        if client:
+            self.client = client
+            client.set_server(self)
+            MSFClient.LOGGER.info("Association client-server is done successfully")
+            return True
+        return False
 
     def read_new_data(self):
-        if self.state == MSFClient.INITIAL:
-            # read msf id and register server
-            # msf id format: 1 byte - size, 2 .. size+1 - msf id
-            id_size_byte = self._read_data(1)
-            if id_size_byte:
-                id_size = struct.unpack("B", id_size_byte)[0]
-                msf_id = self._read_data(id_size)
-                if len(msf_id) == id_size:
-                    self.msf_id = msf_id
-                    client = Registrator.instance().get_new_client_for_server(msf_id)
-                    if client:
-                        self.client = client
-                        client.set_server(self)
-                        self._setup_ssl()
-                        self.state = MSFClient.IDLE
-                    else:
-                        Registrator.instance().subscribe(self.msf_id, self)
-                        self.state = MSFClient.WAIT_CLIENT
-                        return
-                else:
-                    self.LOGGER.error("Incorrect server id data.Closing socket.")
-                    self.sock.close()
-                    self.server.remove_me(self)
-        elif self.state == MSFClient.WAIT_CLIENT:
-            client = Registrator.get_new_client_for_server(self.msf_id)
-            if client:
-                self.client = client
-                client.set_server(self)
-                self._setup_ssl()
-                self.state = MSFClient.IDLE
-        elif self.state == MSFClient.IDLE:
-            # read header
-            header = self._read_data(MSFClient.HEADER_SIZE)
-
-            if header is None:
+        with self.lock:
+            if self.wait_client:
+                MSFClient.LOGGER.error("Data is received in waiting client state.Can't not be here!!!!")
                 return
-
-            if len(header) != MSFClient.HEADER_SIZE:
-                MSFClient.LOGGER.error("Can't read full header)")
-                return
-            MSFClient.LOGGER.debug("PARSE HEADER")
-            xor_key = header[:4][::-1]
-            pkt_length_binary = xor_bytes(xor_key, header[4:8])
-            pkt_length = struct.unpack('>I', pkt_length_binary)[0]
-            self.msf_data.reset(pkt_length+4)
-            MSFClient.LOGGER.info("Incoming packet %d bytes", pkt_length+4)
-            self.msf_data.add_part(header)
-
-        data = self._read_data(self.msf_data.remain_size())
-        if data is None:
-            return
-        self.msf_data.add_part(data)
-
-        if self.msf_data.is_complete():
-            self.send_to_client()
-        else:
-            self.state = MSFClient.RECEIVING_DATA
+            if self.parted_reader:
+                self.parted_reader.read()
 
     def want_write(self):
         if self.client:
             return self.client.server_has_data()
         return False
 
-    def notify_data(self):
+    def polling(self):
         self.server.poll()
-
-    def send_to_client(self):
-        MSFClient.LOGGER.info("All data from server is read. Sending to client.")
-        if self.client:
-            self.client.server_put_data(self.msf_data.get_data())
-        else:
-            MSFClient.LOGGER.error("Client for server id %s is not found.Dropping data", self.msf_id)
-        self.msf_data.reset()
-        self.state = MSFClient.IDLE
 
     def write_data(self):
         if self.client:
@@ -903,10 +1024,8 @@ class MSFListener(object):
         self.loop_thread = None
 
     def remove_me(self, client):
-        try:
+        with ignored(ValueError):
             self.clients.remove(client)
-        except:
-            pass
 
     def poll(self):
         self.poll_pipe[1].write("\x90")
