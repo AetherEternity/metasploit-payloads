@@ -530,7 +530,7 @@ class StageClient(object):
         if not send_data:
             send_data = BlockSizedData(self.stage_data, encoder.MAX_PACKET_SIZE)
             self.encoder_data[encoder] = send_data
-        _, data = self.stage_data.get_data(index)
+        _, data = send_data.get_data(index)
         return encoder.encode_packet(data)
 
 
@@ -583,7 +583,7 @@ class GetDataHeader(Request):
 
 
 class GetStageHeader(Request):
-    EXPR = re.compile(r"7812\.000g\.(?P<rnd>\d+)\.(?P<client>\w)")
+    EXPR = re.compile(r"7812\.000g\.(?P<rnd>\d+)\.0\.(?P<client>\w+)")
     OPTIONS = ["stage_client"]
 
     @classmethod
@@ -604,7 +604,7 @@ class GetDataRequest(Request):
 
 
 class GetStageRequest(Request):
-    EXPR = re.compile(r"7812\.(?P<index>\d+)\.(?P<rnd>\d+)\.(?P<client>\w)")
+    EXPR = re.compile(r"7812\.(?P<index>\d+)\.(?P<rnd>\d+)\.0\.(?P<client>\w+)")
     OPTIONS = ["stage_client"]
 
     @classmethod
@@ -655,6 +655,8 @@ class AAAARequestHandler(object):
         self.logger = logging.getLogger(self.__class__.__name__)
         # self.logger.setLevel(logging.DEBUG)
         self.handlers_chain = [
+            GetStageHeader,
+            GetStageRequest,
             IncomingDataHeaderRequest,
             IncomingDataRequest,
             GetDataRequest,
@@ -935,7 +937,8 @@ class MSFClient(object):
     def _read_stage_header(self):
         MSFClient.LOGGER.info("Start reading stager")
         data_size_b = self._read_data(4)
-        data_size = struct.unpack("I>", data_size_b)[0]
+        data_size = struct.unpack("<I", data_size_b)[0]
+        MSFClient.LOGGER.info("Stager size is %d bytes", data_size)
         return data_size+4, data_size_b
 
     def _read_stage_complete(self, data):
