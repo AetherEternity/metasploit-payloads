@@ -907,10 +907,11 @@ class MSFClient(object):
                                               completion_func=self._read_tlv_complete
                                               )
 
-    def _setup_stage_reader(self, without_completion=False):
+    def _setup_stage_reader(self, without_data=False):
         self.parted_reader = PartedDataReader(read_func=self._read_data,
                                               header_func=self._read_stage_header,
-                                              completion_func=self._read_stage_complete if not without_completion else None
+                                              completion_func=self._read_stage_complete_data_drop if without_data else
+                                                              self._read_stage_complete
                                               )
 
     def _read_id_header(self):
@@ -923,7 +924,7 @@ class MSFClient(object):
         self.msf_id = data.get_data()
         if Registrator.instance().is_stager_server(self.msf_id):
             MSFClient.LOGGER.info("Start reading stage without sending to client")
-            self._setup_stage_reader(without_completion=True)
+            self._setup_stage_reader(without_data=True)
         elif self._setup_client():
             MSFClient.LOGGER.info("Client is found.Setup tlv reader.")
             self._setup_ssl()
@@ -944,6 +945,11 @@ class MSFClient(object):
     def _read_stage_complete(self, data):
         MSFClient.LOGGER.info("Stage read is done")
         Registrator.instance().add_stager_for_server(self.msf_id, data.get_data())
+        self.parted_reader = None
+        self.wait_client = True
+
+    def _read_stage_complete_data_drop(self, data):
+        MSFClient.LOGGER.info("Stage read is done. Drop data and continue.")
         self.parted_reader = None
         self.wait_client = True
 
