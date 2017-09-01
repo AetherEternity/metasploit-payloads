@@ -950,8 +950,15 @@ class MSFClient(object):
 
     def _read_stage_complete_data_drop(self, data):
         MSFClient.LOGGER.info("Stage read is done. Drop data and continue.")
-        self.parted_reader = None
-        self.wait_client = True
+        if self._setup_client():
+            MSFClient.LOGGER.info("Client is found.Setup tlv reader.")
+            self._setup_ssl()
+            self._setup_tlv_reader()
+        else:
+            MSFClient.LOGGER.info("There are no clients for server id %s. Create subscription", self.msf_id)
+            Registrator.instance().subscribe(self.msf_id, self)
+            self.parted_reader = None
+            self.wait_client = True
 
     def _read_tlv_header(self):
         header = self._read_data(MSFClient.HEADER_SIZE)
@@ -1084,8 +1091,6 @@ class MSFListener(object):
                     for cl in self.clients:
                         if cl.get_socket() == s:
                             cl.read_new_data()
-                        else:
-                            self.logger.error("Can't find client for this connection")
 
             # handle write
             for s in write_lst:
