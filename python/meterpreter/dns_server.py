@@ -813,6 +813,11 @@ class MSFClient(object):
     LOGGER = logging.getLogger("MSFClient")
 
     def __init__(self, sock, server):
+        # enable keep-alive every minute
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+        sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPIDLE, 60)
+        sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPCNT, 4)
+        sock.setsockopt(socket.SOL_TCP, socket.TCP_KEEPINTVL, 15)
         self.sock = sock
         self.ssl_socket = None
         self.working_socket = sock
