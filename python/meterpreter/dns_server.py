@@ -87,7 +87,7 @@ class Encoder(object):
             carry_flag = False
             val = lst[index]
             assert(val >= Encoder.MIN_VAL_DOMAIN_SYMBOL)
-            if val > Encoder.MAX_VAL_DOMAIN_SYMBOL:
+            if val >= Encoder.MAX_VAL_DOMAIN_SYMBOL:
                 lst[index] = Encoder.MIN_VAL_DOMAIN_SYMBOL
                 carry_flag = True
             else:
