@@ -6,6 +6,8 @@
 #include "../../common/common.h"
 #include "../../common/config.h"
 #include "server_transport_windns.h"
+#include "../../common/packet_encryption.h"
+#include "../../common/pivot_packet_dispatch.h"
 
 void ngx_txid_base32_encode(wchar_t *dst, unsigned char *src, size_t len) {
     const wchar_t *tbl = L"abcdefghijklmnopqrstuvwxyz234567";
@@ -490,7 +492,7 @@ static BOOL send_request_windns(wchar_t * domain, wchar_t * subdomain, wchar_t* 
  * @return An indication of the result of processing the transmission request.
  * @remark This function is not available on POSIX.
  */
-static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCompletion *completion)
+static DWORD packet_transmit_dns(Remote *remote, LPBYTE packet, DWORD packetLength)
 {
     DWORD ret = 0;
     DWORD tries = 100;
@@ -519,23 +521,20 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
     wchar_t *client_id = ctx->client_id;
     wchar_t *request = NULL;
 
-    DWORD totalLength = packet->payloadLength + sizeof(PacketHeader);
-
     if (ctx->ready == FALSE){
         SetLastError(ERROR_NOT_FOUND);
         return 0;
     }
-    buffer = malloc(totalLength);
+    buffer = malloc(packetLength);
     if (!buffer)
     {
         SetLastError(ERROR_NOT_FOUND);
         return 0;
     }
 
-    memcpy(buffer, &packet->header, sizeof(PacketHeader));
-    memcpy(buffer + sizeof(PacketHeader), packet->payload, packet->payloadLength);
-    
-    DWORD  buffLen = packet->payloadLength + sizeof(PacketHeader);
+    memcpy(buffer, &packet, packetLength);
+
+    DWORD  buffLen = packetLength;
     need_to_send = ((buffLen/5) + (buffLen % 5 > 0 ? 1 : 0)) * 8 ;
     
     base64 = (wchar_t *)calloc(need_to_send + 1, sizeof(wchar_t));
@@ -707,8 +706,6 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
         ret = ERROR_SUCCESS;
     }
 
-    
-    
     return ret;
 }
 
@@ -719,57 +716,14 @@ static DWORD packet_transmit_dns(Remote *remote, Packet *packet, PacketRequestCo
  * @param completion Pointer to the completion routines to process.
  * @return An indication of the result of processing the transmission request.
  */
-static DWORD packet_transmit_via_dns(Remote *remote, Packet *packet, PacketRequestCompletion *completion)
+static DWORD packet_transmit_via_dns(Remote *remote, LPBYTE rawPacket, DWORD rawPacketLength)
 {
-    Tlv requestId;
     DWORD res;
-    dprintf("[PACKET] TRANSMIT... 1 %x", packet);
+    dprintf("[PACKET DNS] TRANSMIT... 1 %p", rawPacket);
     lock_acquire(remote->lock);
-    dprintf("[PACKET] TRANSMIT... 1.0 %x", packet);
-    // If the packet does not already have a request identifier, create one for it
-    if (packet_get_tlv_string(packet, TLV_TYPE_REQUEST_ID, &requestId) != ERROR_SUCCESS)
-    {
-        DWORD index;
-        CHAR rid[32];
-
-        rid[sizeof(rid)-1] = 0;
-        dprintf("[PACKET] TRANSMIT... 1.2");
-        for (index = 0; index < sizeof(rid)-1; index++)
-        {
-            rid[index] = (rand() % 0x5e) + 0x21;
-        }
-
-        packet_add_tlv_string(packet, TLV_TYPE_REQUEST_ID, rid);
-        dprintf("[PACKET] TRANSMIT... 1.3");
-    }
-    dprintf("[PACKET] TRANSMIT... 2");
-
     do
     {
-        // If a completion routine was supplied and the packet has a request
-        // identifier, insert the completion routine into the list
-        if ((completion) &&
-            (packet_get_tlv_string(packet, TLV_TYPE_REQUEST_ID,
-            &requestId) == ERROR_SUCCESS))
-        {
-            dprintf("[PACKET] TRANSMIT... 2.2");
-            packet_add_completion_handler((LPCSTR)requestId.buffer, completion);
-        }
-
-        dprintf("[PACKET] New xor key for sending");
-        packet->header.xor_key = rand_xor_key();
-        dprintf("[PACKET] XOR Encoding payload with %x",packet->header.xor_key);
-        // before transmission, xor the whole lot, starting with the body
-        xor_bytes(packet->header.xor_key, (LPBYTE)packet->payload, packet->payloadLength);
-        dprintf("[PACKET] XOR Encoding header orig %x",packet->payloadLength);
-        // then the header
-        xor_bytes(packet->header.xor_key, (LPBYTE)&packet->header.length, 8);
-        dprintf("[PACKET] XOR Encoding header new %x",packet->payloadLength);
-        // be sure to switch the xor header before writing
-        packet->header.xor_key = htonl(packet->header.xor_key);
-
-        dprintf("[PACKET] Transmitting packet of length %d to remote", packet->payloadLength);
-        res = packet_transmit_dns(remote, packet, completion);
+        res = packet_transmit_dns(remote, rawPacket, rawPacketLength);
         if (res != 0)
         {
             dprintf("[PACKET] transmit failed with return %d\n", res);
@@ -781,12 +735,7 @@ static DWORD packet_transmit_via_dns(Remote *remote, Packet *packet, PacketReque
     } while (0);
 
     res = GetLastError();
-
-    // Destroy the packet
-    packet_destroy(packet);
-
     lock_release(remote->lock);
-
     return res;
 }
 
@@ -931,7 +880,6 @@ static DWORD packet_receive_dns(Remote *remote, Packet **packet)
             memcpy(&header, recieved.packet, sizeof(PacketHeader));
             dprintf("[PACKET RECEIVE DNS] decoding header");
            
-            header.xor_key = ntohl(header.xor_key);
             xor_bytes(header.xor_key, (LPBYTE)&header.length, 8);
             header.length = ntohl(header.length);
             dprintf("[PACKET RECEIVE DNS] key:0x%x len:0x%x",header.xor_key, header.length);
@@ -954,24 +902,7 @@ static DWORD packet_receive_dns(Remote *remote, Packet **packet)
                 dprintf("[PACKET RECEIVE DNS] decoding payload");
                 xor_bytes(header.xor_key, payload, payloadLength);
 
-                // Allocate a packet structure
-                if (!(localPacket = (Packet *)malloc(sizeof(Packet))))
-                {
-                    SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-                    dprintf("[PACKET RECEIVE DNS] ERROR_NOT_ENOUGH_MEMORY");
-                } else {
-
-                    memset(localPacket, 0, sizeof(Packet));
-                    
-                    localPacket->header.length = header.length;
-                    localPacket->header.type = header.type;
-                    localPacket->payload = payload;
-                    localPacket->payloadLength = payloadLength;
-                        
-                    *packet = localPacket;
-                    dprintf("[PACKET RECEIVE DNS] got packet: %x %x %x %x",localPacket->header.length, localPacket->header.type, localPacket->payload, localPacket->payloadLength );
-                    SetLastError(ERROR_SUCCESS);
-                }
+                SetLastError(decrypt_packet(remote, packet, payload, payloadLength));
             }
             
             // Cleanup on failure

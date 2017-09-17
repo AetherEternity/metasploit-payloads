@@ -427,16 +427,12 @@ static DWORD packet_receive(Remote *remote, Packet **packet)
 				break;
 			}
 			dprintf("[TCP] Allocated packet buffer at %p", packetBuffer);
-        
-        dprintf("[PACKET RECEIVE DNS] key:0x%x len:0x%x",header.xor_key, header.length);
-			// Initialize the header
-		vdprintf("[PACKET RECEIVE DNS] tlv length: %d", header.length);
 
 			// Copy the packet header stuff over to the packet
 			memcpy_s(packetBuffer, sizeof(PacketHeader), (LPBYTE)&encodedHeader, sizeof(PacketHeader));
 
 			LPBYTE payload = packetBuffer + sizeof(PacketHeader);
-        dprintf("[PACKET RECEIVE DNS] copy %d",payloadLength);
+
 			// Read the payload
 			while (payloadBytesLeft > 0)
 			{
@@ -906,4 +902,3 @@ Transport* transport_create_tcp(MetsrvTransportTcp* config)
 
 	return transport;
 }
-

@@ -206,24 +206,25 @@ DWORD remote_request_core_transport_list(Remote* remote, Packet* packet)
 					}
 					break;
 				}
-			case METERPRETER_TRANSPORT_DNS:
-            {
-                DnsTransportContext* ctx = (DnsTransportContext*)current->ctx;
-				dprintf("[DISPATCH] Transport is DNS");
-                if (ctx->ns_server)
-				{
-					packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_NSHOST, ctx->ns_server);
-				}
-                if (ctx->client_id)
-				{
-                    packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_CLIENT_ID, ctx->client_id);
-                } 
-                if (ctx->server_id)
-				{
-                    packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_SERVER_ID, ctx->server_id);
-                }
-				break;
-            }
+				case METERPRETER_TRANSPORT_DNS:
+	            {
+	                DnsTransportContext* ctx = (DnsTransportContext*)current->ctx;
+					dprintf("[DISPATCH] Transport is DNS");
+	                if (ctx->ns_server)
+					{
+						packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_NSHOST, ctx->ns_server);
+					}
+	                if (ctx->client_id)
+					{
+	                    packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_CLIENT_ID, ctx->client_id);
+	                } 
+	                if (ctx->server_id)
+					{
+	                    packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_SERVER_ID, ctx->server_id);
+	                }
+					break;
+	            }
+	        }
 
 			packet_add_group(response, TLV_TYPE_TRANS_GROUP, transportGroup);
 
