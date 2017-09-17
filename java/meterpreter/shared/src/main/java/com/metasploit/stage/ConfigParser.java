@@ -4,6 +4,7 @@ import java.io.UnsupportedEncodingException;
 
 public class ConfigParser  {
 
+    public static final int SESSION_EXPIRY_START_LEN = 12;
     public static final int UUID_LEN = 16;
     public static final int GUID_LEN = 16;
     public static final int URL_LEN = 512;
@@ -39,4 +40,11 @@ public class ConfigParser  {
         return res;
     }
 
+    public static long unpack64(byte[] bytes, int offset) {
+        long res = 0;
+        for (int i = 0; i < 8; i++) {
+          res = res | (((long)bytes[i + offset]) & 0xFF) << (i * 8);
+        }
+        return res;
+    }
 }

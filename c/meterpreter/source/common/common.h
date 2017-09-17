@@ -12,8 +12,7 @@
 #include <stdio.h>
 #include <time.h>
 
-#define SAFE_FREE(x) {free(x); x = NULL;}
-#define rand_xor_key() ((((rand() % 254) + 1) << 0) | (((rand() % 254) + 1) << 8) | (((rand() % 254) + 1) << 16) | (((rand() % 254) + 1) << 24))
+#define SAFE_FREE(x) if(x){free(x);x=NULL;}
 
 #include <winsock2.h>
 #include <windows.h>
@@ -35,8 +34,6 @@ typedef struct ___u128 {
 #undef X509_CERT_PAIR
 #undef X509_NAME
 
-#include <openssl/ssl.h>
-
 #include "linkage.h"
 
 #include "args.h"
@@ -54,14 +51,16 @@ typedef struct ___u128 {
 
 #include "zlib/zlib.h"
 
-/*! @brief Indication that the Meterpreter transport is using SSL. */
-#define METERPRETER_TRANSPORT_SSL   0
+/*! @brief Indication that the Meterpreter transport is using TCP. */
+#define METERPRETER_TRANSPORT_TCP    0x1
 /*! @brief Indication that the Meterpreter transport is using HTTP. */
-#define METERPRETER_TRANSPORT_HTTP  1
+#define METERPRETER_TRANSPORT_HTTP   0x2
 /*! @brief Indication that the Meterpreter transport is using HTTPS. */
-#define METERPRETER_TRANSPORT_HTTPS 2
+#define METERPRETER_TRANSPORT_HTTPS  (0x4 | METERPRETER_TRANSPORT_HTTP)
+/*! @brief Indication that the Meterpreter transport is using  named pipes. */
+#define METERPRETER_TRANSPORT_PIPE   0x8
 /*! @brief Indication that the Meterpreter transport is using DNS */
-#define METERPRETER_TRANSPORT_DNS 4
+#define METERPRETER_TRANSPORT_DNS 0x10
 
 VOID sleep(DWORD seconds);
 
@@ -112,4 +111,6 @@ static _inline void real_dprintf(char *format, ...)
 #endif
 
 int current_unix_timestamp(void);
-VOID xor_bytes(DWORD xorKey, LPBYTE buffer, DWORD bufferSize);
+VOID xor_bytes(BYTE xorKey[4], LPBYTE buffer, DWORD bufferSize);
+BOOL is_null_guid(BYTE guid[sizeof(GUID)]);
+VOID rand_xor_key(BYTE buffer[4]);

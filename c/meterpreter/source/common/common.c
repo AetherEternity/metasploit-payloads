@@ -39,7 +39,16 @@ VOID sleep(DWORD seconds)
 	Sleep(seconds * 1000);
 }
 
-VOID xor_bytes(DWORD xorKey, LPBYTE buffer, DWORD bufferSize)
+VOID xor_bytes(BYTE xorKey[4], LPBYTE buffer, DWORD bufferSize)
+{
+	dprintf("[XOR] XORing %u bytes with key %02x%02x%02x%02x", bufferSize, xorKey[0], xorKey[1], xorKey[2], xorKey[3]);
+	for (DWORD i = 0; i < bufferSize; ++i)
+	{
+		buffer[i] ^= xorKey[i % 4];
+	}
+}
+
+VOID rand_xor_key(BYTE buffer[4])
 {
 	static BOOL initialised = FALSE;
 	if (!initialised)
@@ -48,10 +57,13 @@ VOID xor_bytes(DWORD xorKey, LPBYTE buffer, DWORD bufferSize)
 		initialised = TRUE;
 	}
 
-	LPBYTE xor = (LPBYTE)&xorKey;
+	buffer[0] = (rand() % 254) + 1;
+	buffer[1] = (rand() % 254) + 1;
+	buffer[2] = (rand() % 254) + 1;
+	buffer[3] = (rand() % 254) + 1;
+}
 
-	for (DWORD i = 0; i < bufferSize; ++i)
-	{
-		buffer[i] ^= xor[i % sizeof(DWORD)];
-	}
+BOOL is_null_guid(BYTE guid[sizeof(GUID)])
+{
+	return memcmp(guid, "\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", sizeof(guid)) == 0 ? TRUE : FALSE;
 }

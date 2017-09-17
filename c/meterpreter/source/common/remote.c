@@ -3,6 +3,7 @@
  * @brief Definitions of functions and types that interact with a remote endpoint.
  */
 #include "common.h"
+#include "packet_encryption.h"
 
 /*!
  * @brief Instantiate a remote context from a file descriptor.
@@ -14,7 +15,7 @@
  */
 Remote* remote_allocate()
 {
-	Remote* remote = (Remote*)malloc(sizeof(Remote));
+	Remote* remote = (Remote*)calloc(1, sizeof(Remote));
 	LOCK* lock = lock_create();
 
 	do
@@ -24,8 +25,10 @@ Remote* remote_allocate()
 			break;
 		}
 
-		memset(remote, 0, sizeof(Remote));
 		remote->lock = lock;
+		remote->enc_ctx = NULL;
+		remote->pivot_sessions = pivot_tree_create();
+		remote->pivot_listeners = pivot_tree_create();
 
 		dprintf("[REMOTE] remote created %p", remote);
 		return remote;
@@ -34,6 +37,16 @@ Remote* remote_allocate()
 	if (lock)
 	{
 		lock_destroy(lock);
+	}
+
+	if (remote->pivot_sessions)
+	{
+		pivot_tree_destroy(remote->pivot_sessions);
+	}
+
+	if (remote->pivot_listeners)
+	{
+		pivot_tree_destroy(remote->pivot_listeners);
 	}
 
 	if (remote)
@@ -51,6 +64,10 @@ Remote* remote_allocate()
  */
 VOID remote_deallocate(Remote * remote)
 {
+	free_encryption_context(remote);
+	pivot_tree_destroy(remote->pivot_sessions);
+	pivot_tree_destroy(remote->pivot_listeners);
+
 	if (remote->lock)
 	{
 		lock_destroy(remote->lock);
